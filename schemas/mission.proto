@@ -1,0 +1,120 @@
+// The contract between Orchestration Core and the Robot Integration Layer.
+//
+// This is the only interface orchestration core is allowed to depend on.
+// Nothing robot-specific (topic names, SDK auth, OEM error codes) crosses
+// this boundary in either direction.
+
+syntax = "proto3";
+
+package iac.integration_layer.v0;
+
+// ---- Capabilities -----------------------------------------------------
+
+enum CapabilityType {
+  CAPABILITY_UNSPECIFIED = 0;
+  NAVIGATE = 1;
+  INSPECT_VISUAL = 2;
+  INSPECT_THERMAL = 3;
+  DETECT_GAS = 4;
+  MANIPULATE = 5;   // scoped, not fully specified in v0
+  WELD = 6;         // supervised-only in v0; see DESIGN.md section 4
+}
+
+// What a robot currently advertises. Recomputed as payload/battery/location
+// change, not a static fact about the robot model.
+message CapabilityDescriptor {
+  CapabilityType capability_type = 1;
+  string required_payload = 2;         // e.g. "thermal_camera", "gas_sensor"
+  map<string, string> params_schema = 3; // param name -> type hint, informational
+  double expected_duration_s_min = 4;
+  double expected_duration_s_max = 5;
+}
+
+// ---- Missions -----------------------------------------------------------
+
+message MissionStep {
+  CapabilityType capability_type = 1;
+  string target = 2;              // waypoint id / pose reference
+  map<string, string> params = 3; // capability-specific parameters
+  double timeout_s = 4;
+  int32 max_retries = 5;
+}
+
+message Mission {
+  string mission_id = 1;
+  repeated MissionStep steps = 2;
+  string assigned_robot_id = 3;   // set by orchestration core after resolution
+}
+
+// ---- Status ---------------------------------------------------------------
+
+enum MissionStatus {
+  STATUS_UNSPECIFIED = 0;
+  QUEUED = 1;
+  ASSIGNED = 2;
+  IN_PROGRESS = 3;
+  PAUSED_FOR_INTERVENTION = 4;
+  COMPLETED = 5;
+  FAILED = 6;
+  ABORTED = 7;
+}
+
+// Normalized failure vocabulary. OEM-specific error codes get mapped into
+// this taxonomy inside the adapter -- orchestration core never sees a raw
+// OEM error code.
+enum FailureReason {
+  FAILURE_UNSPECIFIED = 0;
+  NONE = 1;
+  CONNECTIVITY_LOST = 2;
+  PRECONDITION_FAILED = 3;
+  SAFETY_ESTOP_TRIGGERED = 4;
+  LOW_BATTERY_ABORT = 5;
+  OPERATOR_INTERVENTION_REQUESTED = 6;
+  TIMEOUT = 7;
+  ADAPTER_UNRESPONSIVE = 8;
+}
+
+message MissionStepStatus {
+  string mission_id = 1;
+  int32 step_index = 2;
+  MissionStatus status = 3;
+  FailureReason failure_reason = 4;
+  string detail = 5;            // human-readable detail, never used for logic
+  int64 timestamp_unix_ms = 6;
+}
+
+// ---- Audit / events ---------------------------------------------------
+
+message AuditEvent {
+  string mission_id = 1;
+  string robot_id = 2;
+  string event_type = 3;   // e.g. "step_started", "operator_intervention"
+  string detail = 4;
+  int64 timestamp_unix_ms = 5;
+}
+
+// ---- Service ------------------------------------------------------------
+
+service RobotIntegrationLayer {
+  rpc AssignMission(Mission) returns (MissionStepStatus);
+  rpc GetMissionStatus(MissionStatusRequest) returns (MissionStepStatus);
+  rpc StreamAuditEvents(AuditStreamRequest) returns (stream AuditEvent);
+  rpc EmergencyStop(EstopRequest) returns (EstopResponse);
+}
+
+message MissionStatusRequest {
+  string mission_id = 1;
+}
+
+message AuditStreamRequest {
+  string mission_id = 1; // empty = all missions
+}
+
+message EstopRequest {
+  string robot_id = 1;
+  string reason = 2;
+}
+
+message EstopResponse {
+  bool acknowledged = 1;
+}

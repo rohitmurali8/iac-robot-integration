@@ -1,0 +1,9 @@
+[project]
+name = "iac-robot-integration"
+version = "0.0.1"
+description = "IAC Robot Integration Layer -- design scaffold"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
