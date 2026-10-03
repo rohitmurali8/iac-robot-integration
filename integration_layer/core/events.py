@@ -38,3 +38,6 @@ class AuditLog:
 
     def all_events(self) -> list[AuditEvent]:
         return list(self._events)
+
+    def clear(self) -> None:
+        self._events.clear()

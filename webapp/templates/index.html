@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IAC Robot Integration Layer — Orchestration Demo</title>
+<style>
+  :root { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  body { margin: 0; background: #0f1115; color: #e6e6e6; }
+  header {
+    padding: 20px 28px; background: #151821; border-bottom: 1px solid #262b38;
+  }
+  header h1 { margin: 0 0 4px 0; font-size: 20px; }
+  header p { margin: 0; color: #9aa3b5; font-size: 13px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 24px 28px; }
+  section { background: #151821; border: 1px solid #262b38; border-radius: 10px; padding: 18px 20px; }
+  section h2 { margin: 0 0 14px 0; font-size: 15px; color: #c7cde0; text-transform: uppercase; letter-spacing: 0.06em; }
+  .fleet-grid { display: flex; flex-direction: column; gap: 12px; }
+  .robot-card {
+    border-radius: 8px; padding: 12px 14px; background: #1b1f2b;
+    border-left: 5px solid #888;
+  }
+  .robot-card .robot-id { font-weight: 600; font-size: 15px; }
+  .robot-card .oem-label { font-size: 12px; opacity: 0.85; margin-top: 2px; }
+  .badges { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px; background: #262b38; color: #cfd6ea;
+  }
+  .controls { display: flex; flex-direction: column; gap: 10px; }
+  button {
+    background: #2a3142; color: #e6e6e6; border: 1px solid #38415a; border-radius: 8px;
+    padding: 10px 14px; font-size: 13px; cursor: pointer; text-align: left;
+  }
+  button:hover { background: #343d54; }
+  button.reset { border-color: #5a3838; color: #e8b5b5; }
+  #last-result {
+    margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: #1b1f2b;
+    font-size: 13px; min-height: 20px; border-left: 5px solid #444;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #232838; }
+  th { color: #9aa3b5; font-weight: 500; }
+  .wide { grid-column: 1 / -1; }
+  .pill { padding: 1px 7px; border-radius: 999px; font-size: 11px; }
+  .pill-completed { background: #1d3a24; color: #8fe39a; }
+  .pill-failed { background: #3a1d1d; color: #e38f8f; }
+  .pill-progress { background: #3a331d; color: #e3c88f; }
+  footer { padding: 10px 28px 24px; color: #5f6880; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IAC Robot Integration Layer — Live Orchestration Demo</h1>
+  <p>One platform API, two genuinely different OEM adapters. Every button below calls the real OrchestrationService.</p>
+</header>
+
+<main>
+  <section>
+    <h2>Registered fleet</h2>
+    <div class="fleet-grid" id="fleet"></div>
+  </section>
+
+  <section>
+    <h2>Mission control</h2>
+    <div class="controls">
+      <button data-capability="inspect_visual">Run visual inspection mission</button>
+      <button data-capability="detect_gas">Run gas detection mission</button>
+      <button data-capability="inspect_thermal">Run thermal inspection mission</button>
+      <button class="reset" id="reset-btn">Reset fleet + audit log</button>
+    </div>
+    <div id="last-result">No mission run yet.</div>
+  </section>
+
+  <section class="wide">
+    <h2>Audit trail (identical event shape regardless of OEM)</h2>
+    <table>
+      <thead>
+        <tr><th>Timestamp</th><th>Mission</th><th>Robot</th><th>Event</th><th>Detail</th></tr>
+      </thead>
+      <tbody id="audit-body"></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  Capabilities and routing are resolved live by integration_layer/core + mock_robot adapters — nothing on this page is hard-coded.
+</footer>
+
+<script>
+let fleetById = {};
+
+async function loadFleet() {
+  const res = await fetch("/api/fleet");
+  const fleet = await res.json();
+  fleetById = Object.fromEntries(fleet.map(r => [r.robot_id, r]));
+
+  const container = document.getElementById("fleet");
+  container.innerHTML = "";
+  for (const robot of fleet) {
+    const card = document.createElement("div");
+    card.className = "robot-card";
+    card.style.borderLeftColor = robot.oem_color;
+    card.innerHTML = `
+      <div class="robot-id">${robot.robot_id}</div>
+      <div class="oem-label">${robot.oem_label} &middot; ${robot.adapter_type}</div>
+      <div class="badges">${robot.capabilities.map(c => `<span class="badge">${c}</span>`).join("")}</div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function statusPillClass(status) {
+  if (status === "completed") return "pill-completed";
+  if (status === "failed" || status === "aborted") return "pill-failed";
+  return "pill-progress";
+}
+
+function renderAudit(events) {
+  const body = document.getElementById("audit-body");
+  body.innerHTML = "";
+  for (const e of events.slice().reverse()) {
+    const robot = fleetById[e.robot_id];
+    const color = robot ? robot.oem_color : "#888";
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${e.timestamp_unix_ms}</td>
+      <td>${e.mission_id || "-"}</td>
+      <td style="color:${color}">${e.robot_id}</td>
+      <td>${e.event_type}</td>
+      <td>${e.detail || ""}</td>
+    `;
+    body.appendChild(row);
+  }
+}
+
+async function loadAudit() {
+  const res = await fetch("/api/audit");
+  renderAudit(await res.json());
+}
+
+async function runMission(capability) {
+  const resultBox = document.getElementById("last-result");
+  resultBox.textContent = `Running ${capability}...`;
+  resultBox.style.borderLeftColor = "#444";
+
+  const res = await fetch("/api/missions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ capability }),
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    resultBox.textContent = `Error: ${data.error}`;
+    resultBox.style.borderLeftColor = "#e38f8f";
+    return;
+  }
+
+  const robot = fleetById[data.robot_id];
+  const pill = `<span class="pill ${statusPillClass(data.status)}">${data.status}</span>`;
+  resultBox.innerHTML =
+    `<b>${data.mission_id}</b> (${data.capability}) &rarr; routed to ` +
+    `<b style="color:${robot ? robot.oem_color : '#ccc'}">${data.robot_id}</b> ` +
+    `(${data.adapter_type}) &rarr; ${pill}`;
+  resultBox.style.borderLeftColor = robot ? robot.oem_color : "#444";
+
+  renderAudit(data.audit);
+}
+
+document.querySelectorAll("button[data-capability]").forEach(btn => {
+  btn.addEventListener("click", () => runMission(btn.dataset.capability));
+});
+
+document.getElementById("reset-btn").addEventListener("click", async () => {
+  await fetch("/api/reset", { method: "POST" });
+  document.getElementById("last-result").textContent = "Fleet and audit log reset.";
+  document.getElementById("last-result").style.borderLeftColor = "#444";
+  await loadFleet();
+  await loadAudit();
+});
+
+loadFleet();
+loadAudit();
+</script>
+</body>
+</html>

@@ -22,6 +22,9 @@ class AdapterRegistry:
     def unregister(self, robot_id: str) -> None:
         self._adapters.pop(robot_id, None)
 
+    def clear(self) -> None:
+        self._adapters.clear()
+
     def get(self, robot_id: str) -> RobotAdapter | None:
         return self._adapters.get(robot_id)
 

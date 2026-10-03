@@ -1,11 +1,47 @@
 # IAC Robot Integration Layer — Technical Assessment
 
 The design doc is [`DESIGN.md`](DESIGN.md) — start there. This directory also
-contains a **working proof of concept**: two genuinely different OEM
-adapters running behind one platform API, with tests and a visual
-demonstration proving the abstraction actually holds.
+contains a **working proof of concept** — two genuinely different OEM
+adapters running behind one platform API — in two forms: a CLI demo, and
+a real browser-based GUI with a recorded session proving it live.
 
-## Proof of concept: what it proves and how to run it
+## Live GUI
+
+`webapp/` is a real Flask app + browser dashboard — not a mockup. Run it
+and click through it yourself:
+
+```bash
+.venv/bin/pip install flask
+.venv/bin/python webapp/app.py
+# open http://127.0.0.1:5055
+```
+
+It shows the registered fleet (one card per robot, color-coded by OEM),
+buttons to run each mission type, and a live audit trail — every click
+calls the real `OrchestrationService` used everywhere else in this repo.
+`webapp/app.py` is a thin wrapper; it does not reimplement capability
+resolution or mission execution.
+
+**Recorded evidence it actually works**, captured by driving the real app
+in real headless Chromium via Playwright (`webapp/record_gui_demo.py`) —
+not hand-picked screenshots, a scripted click-through of an actually
+running server:
+
+- `webapp/output/screenshot_initial.png` — fleet loaded, zero missions run
+- `webapp/output/screenshot_final.png` — after all three missions, audit trail populated
+- `webapp/output/gui_demo.webm` — full session recording (Playwright's native browser video capture)
+
+To reproduce the recording:
+
+```bash
+.venv/bin/pip install playwright
+.venv/bin/playwright install chromium
+.venv/bin/python webapp/record_gui_demo.py
+```
+
+![GUI final state](webapp/output/screenshot_final.png)
+
+## Proof of concept (CLI form): what it proves and how to run it
 
 Two robots, two different adapter implementations, same platform API:
 
@@ -30,19 +66,19 @@ python3 -m venv .venv
 .venv/bin/python demo/make_pipeline_video.py      # records a video of the pipeline running
 ```
 
-### Video
+### CLI pipeline video
 
-`demo/output/video/pipeline_demo.gif` — there's no GUI in this project to
-screen-record (it's a CLI + a generated chart), and no screen-capture
-tool/ffmpeg available in the environment this was built in. So
-`demo/make_pipeline_video.py` does the honest equivalent instead of
-faking a recording: it runs the **real** demo code, captures its **real**
-stdout, and renders that real output as a scrolling terminal animation,
-ending on the real `mission_timeline.png` chart. Nothing in the video is
-staged or invented — every frame is either genuine captured output or the
-genuine generated chart. If `ffmpeg` is on `PATH` it also writes an
-`.mp4`; otherwise the GIF (which plays natively in any browser or image
-viewer, no video player required) is the artifact.
+`demo/output/video/pipeline_demo.gif` — this one predates the GUI above.
+Before `webapp/` existed, there was no GUI and no ffmpeg/screen-capture
+tool available, so `demo/make_pipeline_video.py` does the honest
+equivalent: it runs the **real** demo code, captures its **real** stdout,
+and renders that real output as a scrolling terminal animation, ending on
+the real `mission_timeline.png` chart. Nothing in it is staged or
+invented — every frame is either genuine captured output or the genuine
+generated chart. Kept alongside the GUI recording as a second, independent
+form of evidence (and because it doesn't need a browser to view). If
+`ffmpeg` is on `PATH` it also writes an `.mp4`; otherwise the GIF (which
+plays natively in any browser or image viewer) is the artifact.
 
 `demo/run_demo.py` runs three missions (visual inspection, gas detection,
 thermal inspection) through one function, `run_mission()`, that never
@@ -93,8 +129,8 @@ contract either way.
 ## What's real vs. illustrative
 
 - **Runs, is tested, and is demoed**: everything under `integration_layer/`
-  (except `adapters/ros2_generic/`), `mock_robot/`, `tests/`, and `demo/`.
-  Pure Python, no ROS2/hardware dependency.
+  (except `adapters/ros2_generic/`), `mock_robot/`, `tests/`, `demo/`, and
+  `webapp/`. Pure Python, no ROS2/hardware dependency.
 - **Illustrative, not built or run**: `integration_layer/adapters/ros2_generic/adapter.py`
   and everything in `cpp_nodes/`. Written against the real `rclpy`/`rclcpp`
   API surface for correctness of shape — implementing the same
@@ -125,10 +161,19 @@ demo/
     demo_run.txt                    # captured log from the last demo run
     mission_timeline.png            # swimlane chart of the last demo run
     video/pipeline_demo.gif         # video of the pipeline running (see "Video" above)
+webapp/
+  app.py                             # Flask wrapper around the real OrchestrationService
+  templates/index.html               # the dashboard (vanilla HTML/CSS/JS, no build step)
+  record_gui_demo.py                 # drives the real GUI in headless Chromium, records it
+  output/
+    screenshot_initial.png           # real screenshot: fleet loaded, no missions run
+    screenshot_final.png             # real screenshot: after 3 missions, audit populated
+    gui_demo.webm                    # real recorded browser session
 tests/
   test_adapter_contract.py          # conformance suite, parametrized over both OEMs
   test_platform_agnosticism.py      # proves the robot can be swapped without
                                      # changing platform-facing calling code
+  test_webapp_api.py                # basic tests for the Flask API layer
 ```
 
 ## How I used AI
@@ -148,3 +193,17 @@ real wall-clock time were overlapping unreadably because in-process mock
 calls complete in microseconds — so I had it redone against mission order
 instead of wall-clock time, which is what's actually meaningful for a
 demo like this.
+
+For the GUI (`webapp/`): AI generated the Flask wrapper, the dashboard
+HTML/CSS/JS, and the Playwright recording script. I verified it the same
+way as everything else — by running it, not reading it. The first
+recording attempt was wrong in a way that mattered: a stale Flask process
+from an earlier manual `curl` test was still bound to the port, so the
+"initial, zero missions run" screenshot actually showed two missions
+already in the audit log. I caught that by looking at the screenshot
+content, not just confirming the script exited 0 — a successful script
+run and a correct artifact are different claims, and I checked both. I
+had the script hardened to fail loudly on a port conflict instead of
+silently recording against a stale server, then re-ran it and verified
+the corrected initial/final screenshots by hand before treating the
+recording as evidence.
