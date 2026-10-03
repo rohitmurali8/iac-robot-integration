@@ -36,7 +36,10 @@ class MockRobotAdapter(RobotAdapter):
         step_duration_s: float = 0.0,
     ) -> None:
         self.robot_id = robot_id or f"mock-{uuid.uuid4().hex[:8]}"
-        self._payload = payload or {"visual_camera"}
+        # `payload if payload is not None else ...`, not `payload or ...` --
+        # an explicitly-passed empty set() is falsy, and `or` would
+        # silently override "this robot has no payload" with the default.
+        self._payload = payload if payload is not None else {"visual_camera"}
         self._fail_next_step = fail_next_step
         self._step_duration_s = step_duration_s
         self._battery_pct = 100.0

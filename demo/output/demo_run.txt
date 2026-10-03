@@ -1,0 +1,31 @@
+========================================================================
+Robot Integration Layer -- proof of concept
+Two OEM adapters, one platform API, run_mission() unchanged across both
+========================================================================
+
+Registered fleet:
+  spot-01      (MockRobotAdapter  ) advertises: navigate, inspect_visual, inspect_thermal
+  fleetx-01    (CloudFleetAdapter ) advertises: navigate, detect_gas
+
+Running missions through the SAME run_mission() call path:
+
+  [mission-visual-inspect  ] capability=inspect_visual   -> routed to spot-01    -> completed
+  [mission-gas-detect      ] capability=detect_gas       -> routed to fleetx-01  -> completed
+  [mission-thermal-inspect ] capability=inspect_thermal  -> routed to spot-01    -> completed
+
+Audit trail (identical event shape regardless of OEM):
+  t=1791003226607 mission=mission-visual-inspect   robot=spot-01    event=mission_assigned
+  t=1791003226607 mission=mission-visual-inspect   robot=spot-01    event=step_started (CapabilityType.INSPECT_VISUAL)
+  t=1791003226607 mission=mission-visual-inspect   robot=spot-01    event=mission_step_terminal (status=completed after 1 poll(s))
+  t=1791003226607 mission=mission-gas-detect       robot=fleetx-01  event=mission_assigned
+  t=1791003226607 mission=mission-gas-detect       robot=fleetx-01  event=step_started (CapabilityType.DETECT_GAS)
+  t=1791003226607 mission=mission-gas-detect       robot=fleetx-01  event=mission_step_terminal (status=completed after 2 poll(s))
+  t=1791003226607 mission=mission-thermal-inspect  robot=spot-01    event=mission_assigned
+  t=1791003226607 mission=mission-thermal-inspect  robot=spot-01    event=step_started (CapabilityType.INSPECT_THERMAL)
+  t=1791003226607 mission=mission-thermal-inspect  robot=spot-01    event=mission_step_terminal (status=completed after 1 poll(s))
+
+========================================================================
+Result: 3 missions, 2 different OEM backends, 1 unchanged call path.
+Switching which robot serves a mission (see
+tests/test_platform_agnosticism.py) requires zero changes here.
+========================================================================
