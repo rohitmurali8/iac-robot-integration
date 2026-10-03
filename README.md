@@ -24,10 +24,25 @@ crosses that boundary.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install pytest matplotlib   # matplotlib only needed for the demo image
-.venv/bin/python -m pytest tests/ -v      # 24/24 — conformance + platform-agnosticism
-.venv/bin/python demo/run_demo.py         # runs the demo, writes demo/output/
+.venv/bin/pip install pytest matplotlib pillow   # pillow only needed for the video
+.venv/bin/python -m pytest tests/ -v             # 24/24 — conformance + platform-agnosticism
+.venv/bin/python demo/run_demo.py                # runs the demo, writes demo/output/
+.venv/bin/python demo/make_pipeline_video.py      # records a video of the pipeline running
 ```
+
+### Video
+
+`demo/output/video/pipeline_demo.gif` — there's no GUI in this project to
+screen-record (it's a CLI + a generated chart), and no screen-capture
+tool/ffmpeg available in the environment this was built in. So
+`demo/make_pipeline_video.py` does the honest equivalent instead of
+faking a recording: it runs the **real** demo code, captures its **real**
+stdout, and renders that real output as a scrolling terminal animation,
+ending on the real `mission_timeline.png` chart. Nothing in the video is
+staged or invented — every frame is either genuine captured output or the
+genuine generated chart. If `ffmpeg` is on `PATH` it also writes an
+`.mp4`; otherwise the GIF (which plays natively in any browser or image
+viewer, no video player required) is the artifact.
 
 `demo/run_demo.py` runs three missions (visual inspection, gas detection,
 thermal inspection) through one function, `run_mission()`, that never
@@ -105,7 +120,11 @@ mock_robot/
   cloud_fleet_adapter.py            # OEM adapter #2: cloud/REST-style
 demo/
   run_demo.py                       # PoC demo: same call path, both OEMs
-  output/                           # generated log + timeline image
+  make_pipeline_video.py            # records demo/run_demo.py's real output as a video
+  output/
+    demo_run.txt                    # captured log from the last demo run
+    mission_timeline.png            # swimlane chart of the last demo run
+    video/pipeline_demo.gif         # video of the pipeline running (see "Video" above)
 tests/
   test_adapter_contract.py          # conformance suite, parametrized over both OEMs
   test_platform_agnosticism.py      # proves the robot can be swapped without
