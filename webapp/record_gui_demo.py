@@ -10,6 +10,12 @@ Playwright, clicks through the same three missions demo/run_demo.py runs
                                            video capture -- a real
                                            recording of a real GUI, not a
                                            rendered animation)
+  - webapp/output/gui_demo.mp4            (the same recording transcoded
+                                           to H.264/yuv420p via ffmpeg, if
+                                           ffmpeg is on PATH -- QuickTime
+                                           and most macOS tools don't play
+                                           .webm, so this is the one to
+                                           actually open on a Mac)
 
 Run from the repo root:
     .venv/bin/python webapp/record_gui_demo.py
@@ -17,6 +23,7 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import shutil
 import socket
 import subprocess
 import sys
@@ -31,6 +38,33 @@ PORT = 5055
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
 MISSIONS = ["inspect_visual", "detect_gas", "inspect_thermal"]
+
+
+def transcode_to_mp4(webm_path: Path) -> Path | None:
+    """Converts the Playwright-recorded .webm (VP8/Opus) to an H.264/
+    yuv420p .mp4 -- QuickTime and most native macOS video tools can't play
+    .webm at all, so without this step the "recording" isn't actually
+    viewable on the platform this was built on. Returns None (and leaves
+    only the .webm) if ffmpeg isn't available, rather than failing the
+    whole recording run over a missing optional tool."""
+    if not shutil.which("ffmpeg"):
+        print("ffmpeg not found on PATH -- skipping mp4 transcode, .webm is the only output.")
+        return None
+
+    mp4_path = webm_path.with_suffix(".mp4")
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(webm_path),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(mp4_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"ffmpeg transcode failed (exit {result.returncode}):\n{result.stderr[-2000:]}")
+        return None
+    return mp4_path
 
 
 def assert_port_free(port: int) -> None:
@@ -116,6 +150,10 @@ def main() -> None:
             final_video = OUTPUT_DIR / "gui_demo.webm"
             Path(video_path).rename(final_video)
             print(f"Video saved to {final_video}")
+
+            mp4_path = transcode_to_mp4(final_video)
+            if mp4_path is not None:
+                print(f"Playable mp4 saved to {mp4_path}")
 
     finally:
         server.terminate()

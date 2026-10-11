@@ -29,13 +29,19 @@ running server:
 
 - `webapp/output/screenshot_initial.png` — fleet loaded, zero missions run
 - `webapp/output/screenshot_final.png` — after all three missions, audit trail populated
-- `webapp/output/gui_demo.webm` — full session recording (Playwright's native browser video capture)
+- `webapp/output/gui_demo.mp4` — **open this one on macOS.** H.264/yuv420p,
+  plays in QuickTime and any browser.
+- `webapp/output/gui_demo.webm` — the original Playwright capture (VP8/Opus).
+  QuickTime and most native macOS tools won't play `.webm` directly — the
+  `.mp4` above is a straight ffmpeg transcode of this file, same content,
+  not a re-recording.
 
 To reproduce the recording:
 
 ```bash
 .venv/bin/pip install playwright
 .venv/bin/playwright install chromium
+brew install ffmpeg          # optional -- only needed for the .mp4 transcode
 .venv/bin/python webapp/record_gui_demo.py
 ```
 
@@ -168,7 +174,8 @@ webapp/
   output/
     screenshot_initial.png           # real screenshot: fleet loaded, no missions run
     screenshot_final.png             # real screenshot: after 3 missions, audit populated
-    gui_demo.webm                    # real recorded browser session
+    gui_demo.webm                    # real recorded browser session (Playwright native format)
+    gui_demo.mp4                     # same recording, transcoded for macOS playback
 tests/
   test_adapter_contract.py          # conformance suite, parametrized over both OEMs
   test_platform_agnosticism.py      # proves the robot can be swapped without
@@ -207,3 +214,13 @@ had the script hardened to fail loudly on a port conflict instead of
 silently recording against a stale server, then re-ran it and verified
 the corrected initial/final screenshots by hand before treating the
 recording as evidence.
+
+Separately: the recording was handed over as a `.webm`, which doesn't
+play natively on macOS (QuickTime and most native tools don't support
+it). I had the recording script extended to also transcode to H.264
+`.mp4` via ffmpeg right after capture, rather than leaving that as a
+manual one-off conversion step — then re-ran the whole recording script
+end to end (not just the conversion command) to confirm the transcode is
+actually wired into the pipeline, and extracted a frame from the
+resulting `.mp4` to visually confirm the converted file's content matches
+the original recording, not just that `ffprobe` reports a valid codec.
