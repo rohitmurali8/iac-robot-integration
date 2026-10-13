@@ -45,6 +45,28 @@
   .pill-failed { background: #3a1d1d; color: #e38f8f; }
   .pill-progress { background: #3a331d; color: #e3c88f; }
   footer { padding: 10px 28px 24px; color: #5f6880; font-size: 11px; }
+  .health-row { display: flex; gap: 8px; margin-top: 8px; font-size: 11px; align-items: center; }
+  .health-bar-track { flex: 1; height: 6px; background: #262b38; border-radius: 999px; overflow: hidden; }
+  .health-bar-fill { height: 100%; border-radius: 999px; }
+  .pill-nominal { background: #1d3a24; color: #8fe39a; }
+  .pill-degraded { background: #3a331d; color: #e3c88f; }
+  .pill-offline { background: #3a1d1d; color: #e38f8f; }
+  .badge-sensor-failed { background: #3a1d1d; color: #e38f8f; }
+  .fault-controls { margin-top: 10px; padding-top: 10px; border-top: 1px solid #262b38; display: flex; flex-direction: column; gap: 6px; }
+  .fault-controls label { font-size: 11px; color: #9aa3b5; display: flex; align-items: center; gap: 6px; }
+  .fault-controls input[type="number"] { width: 50px; background: #1b1f2b; border: 1px solid #38415a; color: #e6e6e6; border-radius: 4px; padding: 2px 6px; }
+  .small-btn { padding: 4px 8px; font-size: 11px; width: auto; }
+  .step-timeline { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+  .step-row { display: flex; gap: 8px; align-items: center; font-size: 12px; padding: 4px 8px; background: #1b1f2b; border-radius: 6px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-top: 10px; }
+  .stat-box { background: #1b1f2b; border-radius: 8px; padding: 10px 12px; }
+  .stat-box .stat-value { font-size: 20px; font-weight: 600; }
+  .stat-box .stat-label { font-size: 11px; color: #9aa3b5; }
+  .module-bar-row { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-top: 4px; }
+  .module-bar-track { flex: 1; height: 8px; background: #262b38; border-radius: 999px; overflow: hidden; }
+  .module-bar-fill { height: 100%; background: #e38f8f; }
+  #ask-answer { margin-top: 10px; padding: 12px; background: #1b1f2b; border-radius: 8px; font-size: 13px; min-height: 20px; }
+  .engine-badge { font-size: 10px; padding: 2px 6px; border-radius: 999px; background: #262b38; color: #9aa3b5; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -71,13 +93,41 @@
   </section>
 
   <section class="wide">
+    <h2>Live multi-step mission</h2>
+    <div class="controls" style="flex-direction: row; flex-wrap: wrap;">
+      <button id="run-sweep-live-btn" style="width:auto;" data-steps='[{"capability":"navigate","target":"waypoint_1"},{"capability":"inspect_visual","target":"waypoint_1"}]'>Run inspection sweep (live)</button>
+      <button id="run-patrol-live-btn" style="width:auto;" data-steps='[{"capability":"navigate","target":"waypoint_1"},{"capability":"inspect_visual","target":"waypoint_1"},{"capability":"navigate","target":"waypoint_2"},{"capability":"inspect_thermal","target":"waypoint_2"}]'>Run patrol mission (live)</button>
+    </div>
+    <div class="step-timeline" id="live-timeline"></div>
+  </section>
+
+  <section class="wide">
     <h2>Audit trail (identical event shape regardless of OEM)</h2>
     <table>
-      <thead>
-        <tr><th>Timestamp</th><th>Mission</th><th>Robot</th><th>Event</th><th>Detail</th></tr>
-      </thead>
+      <thead><tr><th>Timestamp</th><th>Mission</th><th>Robot</th><th>Event</th><th>Detail</th></tr></thead>
       <tbody id="audit-body"></tbody>
     </table>
+  </section>
+
+  <section class="wide">
+    <h2>Mission log</h2>
+    <p style="font-size:12px; color:#9aa3b5; margin:0 0 10px;">Click "View mission log" on a robot card above.</p>
+    <div id="mission-log-body"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Fleet analytics</h2>
+    <div class="stats-grid" id="fleet-stats-grid"></div>
+    <div id="module-breakdown"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Ask about the fleet</h2>
+    <div class="controls" style="flex-direction: row;">
+      <input type="text" id="ask-input" placeholder="e.g. which robot is the most reliable?" style="flex:1; background:#1b1f2b; border:1px solid #38415a; color:#e6e6e6; border-radius:8px; padding:10px 14px; font-size:13px;">
+      <button id="ask-btn" style="width:auto;">Ask</button>
+    </div>
+    <div id="ask-answer">Ask a question about fleet performance above.</div>
   </section>
 </main>
 
@@ -87,6 +137,12 @@
 
 <script>
 let fleetById = {};
+
+function networkPillClass(cond) {
+  if (cond === "offline") return "pill-offline";
+  if (cond === "degraded") return "pill-degraded";
+  return "pill-nominal";
+}
 
 async function loadFleet() {
   const res = await fetch("/api/fleet");
@@ -99,13 +155,98 @@ async function loadFleet() {
     const card = document.createElement("div");
     card.className = "robot-card";
     card.style.borderLeftColor = robot.oem_color;
+
+    const powerColor = robot.power_pct < 20 ? "#e38f8f" : "#8fe39a";
+    const sensorBadges = robot.failed_sensors.map(c => `<span class="badge badge-sensor-failed">${c} failed</span>`).join("");
+    const sensorCapabilities = robot.capabilities.filter(c => c !== "navigate");
+    const sensorToggles = sensorCapabilities.map(c => {
+      const checked = robot.failed_sensors.includes(c) ? "" : "checked";
+      return `<label><input type="checkbox" data-sensor-toggle="${robot.robot_id}" data-capability="${c}" ${checked}> ${c} working</label>`;
+    }).join("");
+
     card.innerHTML = `
       <div class="robot-id">${robot.robot_id}</div>
       <div class="oem-label">${robot.oem_label} &middot; ${robot.adapter_type}</div>
-      <div class="badges">${robot.capabilities.map(c => `<span class="badge">${c}</span>`).join("")}</div>
+      <div class="badges">${robot.capabilities.map(c => `<span class="badge">${c}</span>`).join("")}${sensorBadges}</div>
+      <div class="health-row">
+        <span>power</span>
+        <div class="health-bar-track"><div class="health-bar-fill" style="width:${robot.power_pct}%; background:${powerColor};"></div></div>
+        <span>${robot.power_pct.toFixed(0)}%</span>
+      </div>
+      <div class="health-row">
+        <span>network</span>
+        <span class="pill ${networkPillClass(robot.network_condition)}">${robot.network_condition}</span>
+      </div>
+      <div class="fault-controls">
+        <label>
+          <button class="small-btn" data-toggle-offline="${robot.robot_id}" data-currently-offline="${robot.network_condition === "offline"}">
+            ${robot.network_condition === "offline" ? "Bring back online" : "Take offline"}
+          </button>
+        </label>
+        <label>Flaky failures: <input type="number" min="0" max="10" value="0" data-flaky-input="${robot.robot_id}"> <button class="small-btn" data-flaky-btn="${robot.robot_id}">Set</button></label>
+        <label>Random fail rate (comms): <input type="number" min="0" max="1" step="0.1" value="0" data-rate-input="${robot.robot_id}"> <button class="small-btn" data-rate-btn="${robot.robot_id}">Set</button></label>
+        ${sensorToggles}
+        <button class="small-btn" data-mission-log-btn="${robot.robot_id}">View mission log</button>
+      </div>
     `;
     container.appendChild(card);
   }
+
+  wireFleetControls();
+}
+
+function wireFleetControls() {
+  document.querySelectorAll("[data-toggle-offline]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const robotId = btn.dataset.toggleOffline;
+      const currentlyOffline = btn.dataset.currentlyOffline === "true";
+      await fetch(`/api/robots/${robotId}/conditions`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offline: !currentlyOffline }),
+      });
+      await loadFleet();
+    });
+  });
+
+  document.querySelectorAll("[data-flaky-btn]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const robotId = btn.dataset.flakyBtn;
+      const input = document.querySelector(`[data-flaky-input="${robotId}"]`);
+      await fetch(`/api/robots/${robotId}/conditions`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flaky_failures: parseInt(input.value, 10) || 0 }),
+      });
+      await loadFleet();
+    });
+  });
+
+  document.querySelectorAll("[data-rate-btn]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const robotId = btn.dataset.rateBtn;
+      const input = document.querySelector(`[data-rate-input="${robotId}"]`);
+      await fetch(`/api/robots/${robotId}/conditions`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ random_failure_rate: { reason: "network_degraded", probability: parseFloat(input.value) || 0 } }),
+      });
+      await loadFleet();
+    });
+  });
+
+  document.querySelectorAll("[data-sensor-toggle]").forEach(checkbox => {
+    checkbox.addEventListener("change", async () => {
+      const robotId = checkbox.dataset.sensorToggle;
+      const capability = checkbox.dataset.capability;
+      await fetch(`/api/robots/${robotId}/conditions`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ failed_sensor: capability, failed: !checkbox.checked }),
+      });
+      await loadFleet();
+    });
+  });
+
+  document.querySelectorAll("[data-mission-log-btn]").forEach(btn => {
+    btn.addEventListener("click", () => loadMissionLog(btn.dataset.missionLogBtn));
+  });
 }
 
 function statusPillClass(status) {
@@ -137,6 +278,132 @@ async function loadAudit() {
   renderAudit(await res.json());
 }
 
+async function loadMissionLog(robotId) {
+  const res = await fetch(`/api/robots/${robotId}/missions`);
+  const missions = await res.json();
+  const body = document.getElementById("mission-log-body");
+  if (missions.length === 0) {
+    body.innerHTML = `<p style="font-size:12px; color:#9aa3b5;">${robotId} has no mission history yet.</p>`;
+    return;
+  }
+  body.innerHTML = `
+    <h3 style="font-size:13px; margin: 10px 0 6px;">${robotId}'s missions</h3>
+    <table>
+      <thead><tr><th>Mission</th><th>Steps reached</th><th>Final status</th><th>Failure reason</th></tr></thead>
+      <tbody>
+        ${missions.map(m => `
+          <tr>
+            <td>${m.mission_id}</td>
+            <td>${m.steps_reached}</td>
+            <td><span class="pill ${statusPillClass(m.final_status)}">${m.final_status || "-"}</span></td>
+            <td>${m.final_failure_reason && m.final_failure_reason !== "none" ? m.final_failure_reason : ""}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+async function loadStats() {
+  const res = await fetch("/api/stats/fleet");
+  const fleetStats = await res.json();
+
+  const grid = document.getElementById("fleet-stats-grid");
+  grid.innerHTML = `
+    <div class="stat-box"><div class="stat-value">${fleetStats.total_missions}</div><div class="stat-label">total missions</div></div>
+    <div class="stat-box"><div class="stat-value">${(fleetStats.overall_success_rate * 100).toFixed(0)}%</div><div class="stat-label">success rate</div></div>
+    <div class="stat-box"><div class="stat-value">${fleetStats.total_failed}</div><div class="stat-label">failed</div></div>
+    <div class="stat-box"><div class="stat-value">${fleetStats.total_paused}</div><div class="stat-label">paused for intervention</div></div>
+  `;
+
+  const breakdown = document.getElementById("module-breakdown");
+  const entries = Object.entries(fleetStats.failures_by_module);
+  if (entries.length === 0) {
+    breakdown.innerHTML = `<p style="font-size:12px; color:#9aa3b5; margin-top:10px;">No failures recorded yet.</p>`;
+    return;
+  }
+  const maxCount = Math.max(...entries.map(([, c]) => c));
+  breakdown.innerHTML = `
+    <h3 style="font-size:13px; margin: 14px 0 6px;">Failures by system module</h3>
+    ${entries.map(([module, count]) => `
+      <div class="module-bar-row">
+        <span style="width:70px;">${module}</span>
+        <div class="module-bar-track"><div class="module-bar-fill" style="width:${(count / maxCount) * 100}%;"></div></div>
+        <span>${count}</span>
+      </div>
+    `).join("")}
+  `;
+}
+
+function renderLiveStep(status) {
+  const timeline = document.getElementById("live-timeline");
+  const row = document.createElement("div");
+  row.className = "step-row";
+  const detail = status.detail ? ` — ${status.detail}` : "";
+  row.innerHTML = `<span class="pill ${statusPillClass(status.status)}">${status.status}</span> <span>step ${status.step_index}${detail}</span>`;
+  timeline.appendChild(row);
+}
+
+async function runLiveMission(steps) {
+  const timeline = document.getElementById("live-timeline");
+  timeline.innerHTML = "";
+
+  const res = await fetch("/api/missions/live", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ steps }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    timeline.innerHTML = `<div class="step-row">Error: ${data.error}</div>`;
+    return;
+  }
+
+  const source = new EventSource(`/api/missions/${data.mission_id}/stream`);
+  source.onmessage = (event) => {
+    const status = JSON.parse(event.data);
+    if (status.error) {
+      const row = document.createElement("div");
+      row.className = "step-row";
+      row.textContent = `Error: ${status.error}`;
+      timeline.appendChild(row);
+      return;
+    }
+    renderLiveStep(status);
+  };
+  source.addEventListener("done", () => {
+    source.close();
+    loadFleet();
+    loadAudit();
+    loadStats();
+  });
+}
+
+document.getElementById("run-sweep-live-btn").addEventListener("click", () => {
+  runLiveMission(JSON.parse(document.getElementById("run-sweep-live-btn").dataset.steps));
+});
+document.getElementById("run-patrol-live-btn").addEventListener("click", () => {
+  runLiveMission(JSON.parse(document.getElementById("run-patrol-live-btn").dataset.steps));
+});
+
+document.getElementById("ask-btn").addEventListener("click", async () => {
+  const input = document.getElementById("ask-input");
+  const answerBox = document.getElementById("ask-answer");
+  const question = input.value.trim();
+  if (!question) return;
+
+  answerBox.textContent = "Thinking...";
+  const res = await fetch("/api/stats/query", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    answerBox.textContent = `Error: ${data.error}`;
+    return;
+  }
+  answerBox.innerHTML = `${data.answer} <span class="engine-badge">${data.engine}</span>`;
+});
+
 async function runMission(capability) {
   const resultBox = document.getElementById("last-result");
   resultBox.textContent = `Running ${capability}...`;
@@ -164,6 +431,7 @@ async function runMission(capability) {
   resultBox.style.borderLeftColor = robot ? robot.oem_color : "#444";
 
   renderAudit(data.audit);
+  loadStats();
 }
 
 document.querySelectorAll("button[data-capability]").forEach(btn => {
@@ -176,10 +444,14 @@ document.getElementById("reset-btn").addEventListener("click", async () => {
   document.getElementById("last-result").style.borderLeftColor = "#444";
   await loadFleet();
   await loadAudit();
+  document.getElementById("mission-log-body").innerHTML = "";
+  document.getElementById("live-timeline").innerHTML = "";
+  await loadStats();
 });
 
 loadFleet();
 loadAudit();
+loadStats();
 </script>
 </body>
 </html>
