@@ -27,9 +27,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from integration_layer.api.orchestration_service import OrchestrationService
 from integration_layer.core.capability_model import CapabilityType
 from integration_layer.core.events import AuditLog
-from integration_layer.core.mission import Mission, MissionStatus, MissionStep
+from integration_layer.core.mission import (
+    FailureReason,
+    Mission,
+    MissionStatus,
+    MissionStep,
+    MissionStepStatus,
+)
 from integration_layer.core.registry import AdapterRegistry
 from mock_robot.cloud_fleet_adapter import CloudFleetAdapter
+from mock_robot.fault_injection import FaultProfile
 from mock_robot.mock_robot_node import MockRobotAdapter
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
@@ -73,6 +80,86 @@ def run_mission(
         end_s=end,
         status=final_status.status,
     )
+
+
+def build_patrol_mission(mission_id: str) -> Mission:
+    """Navigate -> inspect_visual -> navigate -> inspect_thermal: a
+    four-step patrol using only existing CapabilityTypes, all on a
+    single robot (spot-01 advertises both visual and thermal)."""
+    return Mission(
+        mission_id=mission_id,
+        steps=[
+            MissionStep(capability_type=CapabilityType.NAVIGATE, target="waypoint_1"),
+            MissionStep(capability_type=CapabilityType.INSPECT_VISUAL, target="waypoint_1"),
+            MissionStep(capability_type=CapabilityType.NAVIGATE, target="waypoint_2"),
+            MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="waypoint_2"),
+        ],
+    )
+
+
+def build_inspection_sweep_mission(mission_id: str) -> Mission:
+    """navigate -> inspect_visual: the smallest mission that still
+    exercises multi-step advancement."""
+    return Mission(
+        mission_id=mission_id,
+        steps=[
+            MissionStep(capability_type=CapabilityType.NAVIGATE, target="waypoint_1"),
+            MissionStep(capability_type=CapabilityType.INSPECT_VISUAL, target="waypoint_1"),
+        ],
+    )
+
+
+def _print_step_progress(log) -> callable:
+    """Returns a callback suitable for OrchestrationService.run_mission_with_progress()
+    that prints each status transition AS IT HAPPENS, not just the final
+    result -- this is what makes the CLI demo's output genuinely live for
+    multi-step/retry scenarios, unlike the original single-shot
+    run_mission() above (which is left untouched)."""
+
+    def _callback(status: MissionStepStatus) -> None:
+        detail = f" ({status.detail})" if status.detail else ""
+        log(f"    step {status.step_index}: {status.status.value}{detail}")
+
+    return _callback
+
+
+def run_resilience_demo(service: OrchestrationService, spot: MockRobotAdapter, log) -> None:
+    """Runs multi-step missions under four fault conditions against the
+    SAME robot (spot-01), demonstrating the module-aware retry policy's
+    distinct postures: deterministic comms failures retry and recover,
+    sensor failures never retry and pause for operator intervention,
+    and probabilistic comms failures are handled by the identical
+    retry policy as deterministic ones (the retry layer doesn't care
+    how a failure was triggered)."""
+    log("\n" + "=" * 72)
+    log("Resilience demo -- multi-step missions under four fault conditions")
+    log("=" * 72)
+
+    log("\n--- 1. Nominal: patrol mission runs cleanly ---")
+    nominal = build_patrol_mission("mission-patrol-nominal")
+    status = service.run_mission_with_progress(nominal, _print_step_progress(log))
+    log(f"  final: {status.status.value}")
+
+    log("\n--- 2. Deterministic comms fault: spot-01's link fails twice, then recovers ---")
+    spot.set_flaky(2)
+    flaky = build_patrol_mission("mission-patrol-flaky")
+    status = service.run_mission_with_progress(flaky, _print_step_progress(log))
+    log(f"  final: {status.status.value} (module=comms, retried and recovered)")
+
+    log("\n--- 3. Sensor fault: spot-01's thermal sensor has failed (no retry, pauses) ---")
+    spot.set_flaky(0)
+    spot.set_sensor_failed(CapabilityType.INSPECT_THERMAL)
+    sensor_down = build_patrol_mission("mission-patrol-sensor-fail")
+    status = service.run_mission_with_progress(sensor_down, _print_step_progress(log))
+    log(f"  final: {status.status.value} (module=sensor, zero retries, needs operator)")
+    spot.set_sensor_failed(CapabilityType.INSPECT_THERMAL, failed=False)
+
+    log("\n--- 4. Probabilistic comms fault: unpredictable-looking failures, same retry policy handles them ---")
+    spot.set_fault_profile(FaultProfile(rng_seed=7, random_failure_rates={FailureReason.NETWORK_DEGRADED: 0.5}))
+    probabilistic = build_inspection_sweep_mission("mission-sweep-probabilistic")
+    status = service.run_mission_with_progress(probabilistic, _print_step_progress(log))
+    log(f"  final: {status.status.value} (module=comms, probabilistic failures, same policy as scenario 2)")
+    spot.set_fault_profile(FaultProfile())  # reset to healthy
 
 
 def main() -> list[MissionRunRecord]:
@@ -135,6 +222,23 @@ def main() -> list[MissionRunRecord]:
     log("Switching which robot serves a mission (see")
     log("tests/test_platform_agnosticism.py) requires zero changes here.")
     log("=" * 72)
+
+    run_resilience_demo(service, spot, log)
+
+    log("\nFleet analytics (updated automatically after every mission -- no manual trigger):")
+    fleet_stats = service.get_fleet_stats()
+    log(
+        f"  total missions: {fleet_stats.total_missions}, succeeded: {fleet_stats.total_succeeded}, "
+        f"failed: {fleet_stats.total_failed}, paused: {fleet_stats.total_paused}, "
+        f"overall success rate: {fleet_stats.overall_success_rate:.1%}"
+    )
+    for robot_id in (spot.robot_id, fleetx.robot_id):
+        robot_stats = service.get_robot_stats(robot_id)
+        log(
+            f"  {robot_id}: {robot_stats.missions_run} missions run, "
+            f"success rate {robot_stats.success_rate:.1%}, "
+            f"{robot_stats.total_retries} total retries"
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "demo_run.txt").write_text("\n".join(log_lines) + "\n")

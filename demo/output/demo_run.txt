@@ -14,18 +14,83 @@ Running missions through the SAME run_mission() call path:
   [mission-thermal-inspect ] capability=inspect_thermal  -> routed to spot-01    -> completed
 
 Audit trail (identical event shape regardless of OEM):
-  t=1791433993441 mission=mission-visual-inspect   robot=spot-01    event=mission_assigned
-  t=1791433993441 mission=mission-visual-inspect   robot=spot-01    event=step_started (CapabilityType.INSPECT_VISUAL)
-  t=1791433993441 mission=mission-visual-inspect   robot=spot-01    event=mission_step_terminal (status=completed after 1 poll(s))
-  t=1791433993441 mission=mission-gas-detect       robot=fleetx-01  event=mission_assigned
-  t=1791433993441 mission=mission-gas-detect       robot=fleetx-01  event=step_started (CapabilityType.DETECT_GAS)
-  t=1791433993441 mission=mission-gas-detect       robot=fleetx-01  event=mission_step_terminal (status=completed after 2 poll(s))
-  t=1791433993441 mission=mission-thermal-inspect  robot=spot-01    event=mission_assigned
-  t=1791433993441 mission=mission-thermal-inspect  robot=spot-01    event=step_started (CapabilityType.INSPECT_THERMAL)
-  t=1791433993441 mission=mission-thermal-inspect  robot=spot-01    event=mission_step_terminal (status=completed after 1 poll(s))
+  t=1791872743646 mission=mission-visual-inspect   robot=spot-01    event=mission_assigned
+  t=1791872743646 mission=mission-visual-inspect   robot=spot-01    event=step_started (CapabilityType.INSPECT_VISUAL)
+  t=1791872743646 mission=mission-visual-inspect   robot=spot-01    event=mission_step_terminal (status=completed at step 0)
+  t=1791872743646 mission=mission-gas-detect       robot=fleetx-01  event=mission_assigned
+  t=1791872743646 mission=mission-gas-detect       robot=fleetx-01  event=step_started (CapabilityType.DETECT_GAS)
+  t=1791872743646 mission=mission-gas-detect       robot=fleetx-01  event=mission_step_terminal (status=completed at step 0)
+  t=1791872743646 mission=mission-thermal-inspect  robot=spot-01    event=mission_assigned
+  t=1791872743646 mission=mission-thermal-inspect  robot=spot-01    event=step_started (CapabilityType.INSPECT_THERMAL)
+  t=1791872743646 mission=mission-thermal-inspect  robot=spot-01    event=mission_step_terminal (status=completed at step 0)
 
 ========================================================================
 Result: 3 missions, 2 different OEM backends, 1 unchanged call path.
 Switching which robot serves a mission (see
 tests/test_platform_agnosticism.py) requires zero changes here.
 ========================================================================
+
+========================================================================
+Resilience demo -- multi-step missions under four fault conditions
+========================================================================
+
+--- 1. Nominal: patrol mission runs cleanly ---
+    step 0: completed
+    step 0: completed
+    step 1: completed
+    step 1: completed
+    step 2: completed
+    step 2: completed
+    step 3: completed
+    step 3: completed
+  final: completed
+
+--- 2. Deterministic comms fault: spot-01's link fails twice, then recovers ---
+    step 0: failed
+    step 0: failed
+    step 0: in_progress (retrying (attempt 2/4, module=comms, backoff_s=0.0))
+    step 0: failed
+    step 0: failed
+    step 0: in_progress (retrying (attempt 3/4, module=comms, backoff_s=1.0))
+    step 0: completed
+    step 0: completed
+    step 1: completed
+    step 1: completed
+    step 2: completed
+    step 2: completed
+    step 3: completed
+    step 3: completed
+  final: completed (module=comms, retried and recovered)
+
+--- 3. Sensor fault: spot-01's thermal sensor has failed (no retry, pauses) ---
+    step 0: completed
+    step 0: completed
+    step 1: completed
+    step 1: completed
+    step 2: completed
+    step 2: completed
+    step 3: failed
+    step 3: failed
+    step 3: paused_for_intervention
+  final: paused_for_intervention (module=sensor, zero retries, needs operator)
+
+--- 4. Probabilistic comms fault: unpredictable-looking failures, same retry policy handles them ---
+    step 0: failed
+    step 0: failed
+    step 0: in_progress (retrying (attempt 2/4, module=comms, backoff_s=0.0))
+    step 0: failed
+    step 0: failed
+    step 0: in_progress (retrying (attempt 3/4, module=comms, backoff_s=1.0))
+    step 0: completed
+    step 0: completed
+    step 1: failed
+    step 1: failed
+    step 1: in_progress (retrying (attempt 2/4, module=comms, backoff_s=0.0))
+    step 1: completed
+    step 1: completed
+  final: completed (module=comms, probabilistic failures, same policy as scenario 2)
+
+Fleet analytics (updated automatically after every mission -- no manual trigger):
+  total missions: 7, succeeded: 6, failed: 0, paused: 1, overall success rate: 85.7%
+  spot-01: 6 missions run, success rate 83.3%, 5 total retries
+  fleetx-01: 1 missions run, success rate 100.0%, 0 total retries
