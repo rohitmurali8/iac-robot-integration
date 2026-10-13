@@ -21,6 +21,7 @@ import uuid
 from integration_layer.core.adapter_base import RobotAdapter
 from integration_layer.core.capability_model import CapabilityDescriptor, CapabilityType
 from integration_layer.core.mission import FailureReason, MissionStatus, MissionStep, MissionStepStatus
+from mock_robot.fault_injection import FaultProfile, healthy_profile
 
 
 class MockRobotAdapter(RobotAdapter):
@@ -34,6 +35,7 @@ class MockRobotAdapter(RobotAdapter):
         payload: set[str] | None = None,
         fail_next_step: bool = False,
         step_duration_s: float = 0.0,
+        fault_profile: FaultProfile | None = None,
     ) -> None:
         self.robot_id = robot_id or f"mock-{uuid.uuid4().hex[:8]}"
         # `payload if payload is not None else ...`, not `payload or ...` --
@@ -44,6 +46,8 @@ class MockRobotAdapter(RobotAdapter):
         self._step_duration_s = step_duration_s
         self._battery_pct = 100.0
         self._steps: dict[tuple[str, int], MissionStepStatus] = {}
+        self._fault_profile = fault_profile if fault_profile is not None else healthy_profile()
+        self._pending_latency: dict[tuple[str, int], int] = {}
 
     def get_capabilities(self) -> list[CapabilityDescriptor]:
         capabilities = [CapabilityDescriptor(capability_type=CapabilityType.NAVIGATE)]
@@ -73,6 +77,33 @@ class MockRobotAdapter(RobotAdapter):
     def execute_mission_step(
         self, mission_id: str, step_index: int, step: MissionStep
     ) -> MissionStepStatus:
+        if self._fault_profile.offline:
+            status = self._make_status(
+                mission_id, step_index, MissionStatus.FAILED, FailureReason.CONNECTIVITY_LOST
+            )
+            self._steps[(mission_id, step_index)] = status
+            return status
+
+        if self._fault_profile.is_sensor_failed(step.capability_type):
+            status = self._make_status(
+                mission_id, step_index, MissionStatus.FAILED, FailureReason.SENSOR_FAULT
+            )
+            self._steps[(mission_id, step_index)] = status
+            return status
+
+        if self._fault_profile.consume_flaky_failure():
+            status = self._make_status(
+                mission_id, step_index, MissionStatus.FAILED, FailureReason.NETWORK_DEGRADED
+            )
+            self._steps[(mission_id, step_index)] = status
+            return status
+
+        random_failure = self._fault_profile.maybe_random_failure()
+        if random_failure is not None:
+            status = self._make_status(mission_id, step_index, MissionStatus.FAILED, random_failure)
+            self._steps[(mission_id, step_index)] = status
+            return status
+
         if self._battery_pct <= 5.0:
             status = self._make_status(
                 mission_id, step_index, MissionStatus.FAILED, FailureReason.LOW_BATTERY_ABORT
@@ -93,10 +124,18 @@ class MockRobotAdapter(RobotAdapter):
 
         self._battery_pct -= 2.0
         self._steps[(mission_id, step_index)] = status
+
+        if status.status == MissionStatus.COMPLETED and self._fault_profile.extra_latency_polls > 0:
+            self._pending_latency[(mission_id, step_index)] = self._fault_profile.extra_latency_polls
+
         return status
 
     def get_status(self, mission_id: str, step_index: int) -> MissionStepStatus:
         key = (mission_id, step_index)
+        remaining = self._pending_latency.get(key, 0)
+        if remaining > 0:
+            self._pending_latency[key] = remaining - 1
+            return self._make_status(mission_id, step_index, MissionStatus.IN_PROGRESS)
         if key in self._steps:
             return self._steps[key]
         return self._make_status(
@@ -117,6 +156,30 @@ class MockRobotAdapter(RobotAdapter):
 
     def set_battery(self, pct: float) -> None:
         self._battery_pct = pct
+
+    def set_fault_profile(self, fault_profile: FaultProfile) -> None:
+        self._fault_profile = fault_profile
+
+    def get_fault_profile(self) -> FaultProfile:
+        return self._fault_profile
+
+    def set_sensor_failed(self, capability_type: CapabilityType, failed: bool = True) -> None:
+        if failed:
+            self._fault_profile.failed_sensors.add(capability_type)
+        else:
+            self._fault_profile.failed_sensors.discard(capability_type)
+
+    def set_offline(self, offline: bool = True) -> None:
+        self._fault_profile.offline = offline
+
+    def set_flaky(self, failures_remaining: int) -> None:
+        self._fault_profile.flaky_failures_remaining = failures_remaining
+
+    def set_random_failure_rate(self, failure_reason: FailureReason, probability: float) -> None:
+        self._fault_profile.random_failure_rates[failure_reason] = probability
+
+    def get_power_pct(self) -> float:
+        return self._battery_pct
 
     def _make_status(
         self,

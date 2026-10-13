@@ -22,6 +22,7 @@ import uuid
 from integration_layer.core.adapter_base import RobotAdapter
 from integration_layer.core.capability_model import CapabilityDescriptor, CapabilityType
 from integration_layer.core.mission import FailureReason, MissionStatus, MissionStep, MissionStepStatus
+from mock_robot.fault_injection import FaultProfile, healthy_profile
 
 # Capability names as this fictional OEM's cloud API would actually name
 # them in a fleet manifest response -- deliberately not matching our
@@ -52,6 +53,7 @@ class CloudFleetAdapter(RobotAdapter):
         robot_id: str | None = None,
         fleet_manifest: dict | None = None,
         inject_oem_error: str | None = None,
+        fault_profile: FaultProfile | None = None,
     ) -> None:
         self.robot_id = robot_id or f"cloud-{uuid.uuid4().hex[:8]}"
         # Simulates the OEM's own login flow -- a real adapter would do
@@ -69,6 +71,7 @@ class CloudFleetAdapter(RobotAdapter):
         # silent gaps, which is exactly what the conformance suite checks for.
         self._jobs: dict[tuple[str, int], dict] = {}
         self.estop_called = False
+        self._fault_profile = fault_profile if fault_profile is not None else healthy_profile()
 
     def get_capabilities(self) -> list[CapabilityDescriptor]:
         capabilities = [CapabilityDescriptor(capability_type=CapabilityType.NAVIGATE)]
@@ -88,6 +91,27 @@ class CloudFleetAdapter(RobotAdapter):
     ) -> MissionStepStatus:
         key = (mission_id, step_index)
 
+        if self._fault_profile.offline:
+            status = self._status(mission_id, step_index, MissionStatus.FAILED, FailureReason.CONNECTIVITY_LOST)
+            self._jobs[key] = {"state": "REJECTED", "forced_status": status}
+            return status
+
+        if self._fault_profile.is_sensor_failed(step.capability_type):
+            status = self._status(mission_id, step_index, MissionStatus.FAILED, FailureReason.SENSOR_FAULT)
+            self._jobs[key] = {"state": "REJECTED", "forced_status": status}
+            return status
+
+        if self._fault_profile.consume_flaky_failure():
+            status = self._status(mission_id, step_index, MissionStatus.FAILED, FailureReason.NETWORK_DEGRADED)
+            self._jobs[key] = {"state": "REJECTED", "forced_status": status}
+            return status
+
+        random_failure = self._fault_profile.maybe_random_failure()
+        if random_failure is not None:
+            status = self._status(mission_id, step_index, MissionStatus.FAILED, random_failure)
+            self._jobs[key] = {"state": "REJECTED", "forced_status": status}
+            return status
+
         if self._soc_percent <= 5.0:
             status = self._status(mission_id, step_index, MissionStatus.FAILED, FailureReason.LOW_BATTERY_ABORT)
             # Recorded here too, not just returned -- a step rejected
@@ -104,7 +128,7 @@ class CloudFleetAdapter(RobotAdapter):
             # Simulates a cloud round-trip taking a couple of polls to
             # resolve -- this is what makes get_status() meaningfully
             # different from the local adapter's immediate-completion style.
-            "polls_remaining": 1,
+            "polls_remaining": 1 + self._fault_profile.extra_latency_polls,
             "oem_error": self._inject_oem_error,
             "forced_status": None,
         }
@@ -152,6 +176,30 @@ class CloudFleetAdapter(RobotAdapter):
 
     def set_state_of_charge(self, pct: float) -> None:
         self._soc_percent = pct
+
+    def set_fault_profile(self, fault_profile: FaultProfile) -> None:
+        self._fault_profile = fault_profile
+
+    def get_fault_profile(self) -> FaultProfile:
+        return self._fault_profile
+
+    def set_sensor_failed(self, capability_type: CapabilityType, failed: bool = True) -> None:
+        if failed:
+            self._fault_profile.failed_sensors.add(capability_type)
+        else:
+            self._fault_profile.failed_sensors.discard(capability_type)
+
+    def set_offline(self, offline: bool = True) -> None:
+        self._fault_profile.offline = offline
+
+    def set_flaky(self, failures_remaining: int) -> None:
+        self._fault_profile.flaky_failures_remaining = failures_remaining
+
+    def set_random_failure_rate(self, failure_reason: FailureReason, probability: float) -> None:
+        self._fault_profile.random_failure_rates[failure_reason] = probability
+
+    def get_power_pct(self) -> float:
+        return self._soc_percent
 
     def _submit_job(self, step: MissionStep) -> str:
         return f"job_{uuid.uuid4().hex[:10]}"
