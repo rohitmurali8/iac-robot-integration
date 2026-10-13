@@ -22,6 +22,17 @@ calls the real `OrchestrationService` used everywhere else in this repo.
 `webapp/app.py` is a thin wrapper; it does not reimplement capability
 resolution or mission execution.
 
+Beyond the original fleet cards and mission buttons, the dashboard now
+also shows: a robot health panel (power/network/sensor status per
+robot), fault-injection controls per robot (deterministic and
+probabilistic), a live multi-step mission execution view driven by
+Server-Sent Events with a real-time per-step timeline, a per-robot
+Mission Log, a Fleet Analytics panel (success rate, retries, failures,
+paused-for-intervention counts), and an "Ask about the fleet"
+natural-language query box. The query box works out of the box with a
+deterministic template engine; set `ANTHROPIC_API_KEY` (and
+`pip install anthropic`) for full LLM-powered answers instead.
+
 **Recorded evidence it actually works**, captured by driving the real app
 in real headless Chromium via Playwright (`webapp/record_gui_demo.py`) —
 not hand-picked screenshots, a scripted click-through of an actually
@@ -47,6 +58,50 @@ brew install ffmpeg          # optional -- only needed for the .mp4 transcode
 
 ![GUI final state](webapp/output/screenshot_final.png)
 
+## Multi-step missions, resilience, and fleet analytics
+
+Beyond the original single-step PoC above, the orchestration core now
+actually executes multi-step missions end to end, handles failures the
+way a real fleet operator would want, and keeps live fleet statistics —
+no new OEM adapters needed, none of it is a parallel code path.
+
+- **Multi-step missions actually execute, sequentially.** `Mission.steps`
+  used to be a dormant field; it now drives real execution, one step
+  after another, with per-step progress callbacks via
+  `OrchestrationService.run_mission_with_progress()`, backed by
+  `integration_layer/core/mission_executor.py`.
+- **Module-aware retry.** Every failure is classified by the
+  `SystemModule` actually implicated (comms / sensor / power / safety /
+  planning) and handled per a policy table in
+  `integration_layer/core/retry_policy.py`: comms failures retry with
+  increasing backoff; sensor and safety failures never auto-retry and
+  instead pause the mission for operator intervention; power and
+  planning failures fail outright (retrying a low-battery abort or a bad
+  precondition doesn't fix anything).
+- **Hybrid fault injection.** `mock_robot/fault_injection.py`'s
+  `FaultProfile` supports both deterministic faults (`set_offline`,
+  `set_flaky`, `set_sensor_failed`) for reproducible demos and tests, and
+  probabilistic faults (`set_random_failure_rate`, seeded via
+  `FaultProfile.rng_seed`) for realistic, less-predictable conditions —
+  both kinds funnel through the exact same retry policy, so the system
+  doesn't need to know or care which kind of fault it's seeing.
+- **Automatic fleet/robot analytics.** `integration_layer/core/mission_analytics.py`
+  updates incrementally the instant a mission ends — no manual trigger,
+  no batch recompute — and is queryable via
+  `OrchestrationService.get_fleet_stats()` / `get_robot_stats()`.
+- **Natural-language fleet querying.** The GUI's "Ask about the fleet" box
+  is backed by `integration_layer/core/stats_query.py`: a deterministic
+  template engine answers common questions by default, or, if
+  `ANTHROPIC_API_KEY` is set (and `pip install anthropic` is additionally
+  done), real Claude API answers take over. The template engine needs
+  neither the package nor the key.
+
+See it live: `demo/run_demo.py`'s resilience-demo section walks all four
+fault postures against the real retry policy and prints fleet analytics
+at the end; in `webapp/`, the health panel, fault-injection controls,
+live multi-step mission execution, Mission Log, Fleet Analytics panel,
+and Ask-about-the-fleet box are all driven by the same real backend.
+
 ## Proof of concept (CLI form): what it proves and how to run it
 
 Two robots, two different adapter implementations, same platform API:
@@ -67,7 +122,7 @@ crosses that boundary.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install pytest matplotlib pillow   # pillow only needed for the video
-.venv/bin/python -m pytest tests/ -v             # 24/24 — conformance + platform-agnosticism
+.venv/bin/python -m pytest tests/ -v             # 155/155 — conformance + platform-agnosticism + retry/fault-injection/analytics/LLM-query
 .venv/bin/python demo/run_demo.py                # runs the demo, writes demo/output/
 .venv/bin/python demo/make_pipeline_video.py      # records a video of the pipeline running
 ```
@@ -154,12 +209,18 @@ schemas/mission.proto                # the canonical wire contract
 integration_layer/
   core/                              # capability model, mission/status schema,
                                      # adapter interface, registry, audit log
+    retry_policy.py                 # module-aware retry policy table
+    step_runner.py                  # single-step execution, owns its own retries
+    mission_executor.py             # cross-step sequencing + post-mission analytics hook
+    mission_analytics.py            # incremental fleet/robot statistics
+    stats_query.py                  # template + Anthropic LLM query engines
   adapters/ros2_generic/adapter.py  # ROS2 worked example (illustrative, see above)
-  api/orchestration_service.py      # what orchestration core actually calls
+  api/orchestration_service.py      # thin facade over MissionExecutor
 cpp_nodes/                           # latency-critical ROS2 nodes (illustrative)
 mock_robot/
   mock_robot_node.py                # OEM adapter #1: local/ROS2-style
   cloud_fleet_adapter.py            # OEM adapter #2: cloud/REST-style
+  fault_injection.py                # hybrid deterministic + probabilistic FaultProfile
 demo/
   run_demo.py                       # PoC demo: same call path, both OEMs
   make_pipeline_video.py            # records demo/run_demo.py's real output as a video
@@ -180,7 +241,17 @@ tests/
   test_adapter_contract.py          # conformance suite, parametrized over both OEMs
   test_platform_agnosticism.py      # proves the robot can be swapped without
                                      # changing platform-facing calling code
-  test_webapp_api.py                # basic tests for the Flask API layer
+  test_webapp_api.py                # tests for the Flask API layer (now incl.
+                                     # health, fault controls, live SSE mission,
+                                     # mission log, fleet stats, stats-query)
+  test_retry_policy.py              # module-aware retry policy table
+  test_fault_injection.py           # deterministic + probabilistic FaultProfile
+  test_step_runner.py               # single-step execution + retry
+  test_mission_executor.py          # cross-step sequencing + analytics hook
+  test_mission_analytics.py         # incremental fleet/robot statistics
+  test_stats_query.py               # template + Anthropic LLM query engines
+  test_multistep_missions.py        # end-to-end multi-step mission execution
+  test_audit_log_indexing.py        # per-mission/per-robot audit log indices
 ```
 
 ## How I used AI
@@ -224,3 +295,54 @@ end to end (not just the conversion command) to confirm the transcode is
 actually wired into the pipeline, and extracted a frame from the
 resulting `.mp4` to visually confirm the converted file's content matches
 the original recording, not just that `ffprobe` reports a valid codec.
+
+For this expansion (multi-step execution, module-aware retry, hybrid
+fault injection, fleet analytics, LLM querying, and the GUI upgrade that
+surfaces all of it): I pushed back on the first AI-proposed plan twice
+before implementation started, not after. First, the initial design put
+all multi-step/retry logic inline in one method — I rejected that as a
+single point of failure with no way to test retry behavior independently
+of sequencing, and the plan was revised into decomposed, independently
+testable components (`StepRunner` owns single-step execution and its own
+retries; `MissionExecutor` owns cross-step sequencing and the
+post-mission analytics hook; `OrchestrationService` was then rewritten as
+a thin facade over both). Second, the initial fault-injection design was
+deterministic-only — I rejected that as unrealistic for a system meant to
+demonstrate resilience, and the plan was revised to a hybrid: deterministic
+countdowns (for reproducible tests/demos) plus seeded-probabilistic
+failure rates (for genuinely unpredictable-looking conditions), both
+funneled through the same retry policy so neither the orchestration code
+nor the demo narrative has to special-case which kind of fault it's
+seeing.
+
+Implementation itself was carried out via a subagent-driven process: a
+fresh implementer subagent per task, followed by an independent reviewer
+subagent with no access to the implementer's reasoning, only the diff and
+the brief. This caught real things, not just style nits — worth naming
+specifically rather than vaguely: in the task that added `StepRunner`
+(single-step execution with owned retries), the reviewer independently
+hand-traced the retry/backoff arithmetic against `retry_policy.py`'s
+actual formula rather than trusting the implementer's report, and
+confirmed it exact (4 total calls for `max_attempts=4`, correct backoff
+index at each step). In the task that added `MissionExecutor`, the
+implementer didn't just claim the mixed-fleet routing fix was correct —
+they empirically proved it by temporarily reintroducing the exact bug the
+design called out (resolving each subsequent step's adapter by robot
+instead of by capability) and re-running the mixed-fleet test to confirm
+it failed in exactly the expected way, then restored the correct code and
+confirmed the test passed again. In the task that rewrote
+`OrchestrationService` as a thin facade — the single highest-risk change
+in this whole expansion, since it's the one thing every other component
+calls through — the reviewer re-verified from scratch, independently of
+the implementer's own report, that the three pinned regression-gate files
+(`test_adapter_contract.py`, `test_platform_agnosticism.py`,
+`test_webapp_api.py`) still produced a byte-for-byte empty `git diff`
+against the pre-rewrite commit, not just that the tests passed. I
+repeated that same pinned-diff check myself in this closing task, against
+the commit from before this entire plan's work began (not just the
+previous task), and it's still genuinely empty — see the regression-gate
+section above. `StepRunner`'s resumable-polling design (continuing a
+step's retry loop from partial state without a fresh `execute` call) was
+also independently verified twice, once when it was introduced and again
+when `MissionExecutor.continue_mission` was built on top of it, rather
+than assumed correct because it worked once.
