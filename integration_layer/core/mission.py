@@ -38,6 +38,16 @@ class FailureReason(str, Enum):
     OPERATOR_INTERVENTION_REQUESTED = "operator_intervention_requested"
     TIMEOUT = "timeout"
     ADAPTER_UNRESPONSIVE = "adapter_unresponsive"
+    SENSOR_FAULT = "sensor_fault"          # hardware/payload broken, distinct from PRECONDITION_FAILED (planning/logic issue)
+    NETWORK_DEGRADED = "network_degraded"  # link up but lossy/slow, distinct from CONNECTIVITY_LOST (fully unreachable)
+
+
+class SystemModule(str, Enum):
+    COMMS = "comms"
+    SENSOR = "sensor"
+    POWER = "power"
+    SAFETY = "safety"
+    PLANNING = "planning"
 
 
 @dataclass(frozen=True)
