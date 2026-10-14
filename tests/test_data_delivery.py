@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import zipfile
 
 import pytest
@@ -194,6 +195,60 @@ def test_push_fails_all_attempts_via_stub_http_open(tmp_path):
     assert record.status == DeliveryStatus.PUSH_FAILED
     assert record.delivered_customer_ids == []
     assert record.failed_customer_ids == ["acme"]
+
+
+def test_push_retries_consult_backoff_for_attempt_when_poll_interval_set(tmp_path, monkeypatch):
+    """Proves retry_policy.backoff_for_attempt() is genuinely consulted
+    (not just strategy_for()'s max_attempts): with poll_interval_s > 0,
+    forcing 2 failed attempts before success must incur real, measurable
+    sleep delay. Uses a small test-local backoff table (via a patched
+    strategy_for()) so the proof stays fast/deterministic -- the real,
+    unpatched backoff_for_attempt() is still the function that computes
+    and is consulted for the sleep duration every retry."""
+    from integration_layer.core import retry_policy as retry_policy_module
+
+    small_backoff_strategy = retry_policy_module.RetryStrategy(
+        retryable=True, max_attempts=4, backoff_s=(0.0, 0.02, 0.04)
+    )
+    monkeypatch.setattr(retry_policy_module, "strategy_for", lambda reason: small_backoff_strategy)
+
+    attempts = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def read(self): return b"{}"
+
+    def _stub_http_open(request, timeout):
+        attempts.append(request.full_url)
+        if len(attempts) < 3:
+            import urllib.error
+            raise urllib.error.URLError("connection refused (simulated)")
+        return _FakeResponse()
+
+    registry = AdapterRegistry()
+    registry.register(MockRobotAdapter(robot_id="spot-01"))
+    customer_registry = CustomerRegistry()
+    customer_registry.register(Customer(
+        customer_id="acme", webhook_url="http://example.invalid/webhook",
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+    service = DeliveryService(registry, customer_registry, tmp_path, http_open=_stub_http_open, poll_interval_s=0.01)
+    mission, final_status, step_history, artifacts = _completed_mission()
+    robot_stats = RobotStats(robot_id="spot-01")
+
+    start = time.monotonic()
+    record = service.deliver(mission, final_status, step_history, artifacts, {}, robot_stats)
+    elapsed = time.monotonic() - start
+
+    assert record.status == DeliveryStatus.DELIVERED
+    assert len(attempts) == 3
+    # backoff_s=(0.0, 0.02, 0.04): attempt 2 has 0.0 backoff, attempt 3 has
+    # 0.02s backoff -- some nonzero delay must have occurred given
+    # poll_interval_s > 0 gates it open. Loose bound to avoid flakiness.
+    assert elapsed >= 0.005
 
 
 # -- DeliveryService: push phase against a REAL local server -------------

@@ -27,6 +27,7 @@ missions never reach this module at all.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -118,11 +119,13 @@ class DeliveryService:
         customer_registry: CustomerRegistry,
         output_dir: Path,
         http_open: Callable = urllib.request.urlopen,
+        poll_interval_s: float = 0.0,
     ) -> None:
         self._registry = registry
         self._customer_registry = customer_registry
         self._packager = DeliveryPackager(output_dir)
         self._http_open = http_open
+        self.poll_interval_s = poll_interval_s
 
     def deliver(
         self,
@@ -202,6 +205,9 @@ class DeliveryService:
                 return True
             if attempt >= strategy.max_attempts:
                 return False
+            backoff = retry_policy.backoff_for_attempt(strategy, attempt + 1)
+            if self.poll_interval_s and backoff:
+                time.sleep(backoff)
             attempt += 1
 
     def _push_to_customer(self, customer, mission: Mission, package_path: Path) -> bool:
@@ -228,4 +234,7 @@ class DeliveryService:
                 pass
             if attempt >= strategy.max_attempts:
                 return False
+            backoff = retry_policy.backoff_for_attempt(strategy, attempt + 1)
+            if self.poll_interval_s and backoff:
+                time.sleep(backoff)
             attempt += 1
