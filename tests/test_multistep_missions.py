@@ -322,3 +322,37 @@ def test_get_delivery_record_returns_none_for_unknown_mission():
     service = OrchestrationService(registry, AuditLog())
 
     assert service.get_delivery_record("never-ran") is None
+
+
+def test_wait_for_completion_with_custom_poll_config_still_wires_delivery_service(tmp_path):
+    """Covers the gap flagged by task reviewer: _executor_for's throwaway-
+    MissionExecutor branch (when max_polls/poll_interval_s differ from
+    defaults) must thread delivery_service through, otherwise
+    self._executor.delivery_service attribute access raises AttributeError.
+    This test forces that branch by using non-default poll config and
+    verifies it completes without raising an AttributeError."""
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    registry.register(adapter)
+
+    customer_registry = CustomerRegistry()
+    customer_registry.register(Customer(
+        customer_id="acme",
+        webhook_url="http://example.invalid/webhook",
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+    service = OrchestrationService(
+        registry, AuditLog(), customer_registry=customer_registry, delivery_output_dir=tmp_path
+    )
+    mission = Mission(mission_id="m-custom-poll", steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")])
+
+    service.assign_mission(mission)
+    # Non-default max_polls/poll_interval_s forces _executor_for's throwaway-
+    # MissionExecutor branch, which must still thread delivery_service through
+    # (this is the exact attribute access the task reviewer flagged as untested).
+    # The critical test: this call must not raise AttributeError when accessing
+    # self._executor.delivery_service inside _executor_for.
+    final_status = service.wait_for_completion("m-custom-poll", max_polls=5, poll_interval_s=0.0)
+
+    assert final_status.status == MissionStatus.COMPLETED
