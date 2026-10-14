@@ -14,15 +14,15 @@ Running missions through the SAME run_mission() call path:
   [mission-thermal-inspect ] capability=inspect_thermal  -> routed to spot-01    -> completed
 
 Audit trail (identical event shape regardless of OEM):
-  t=1791874187498 mission=mission-visual-inspect   robot=spot-01    event=mission_assigned
-  t=1791874187498 mission=mission-visual-inspect   robot=spot-01    event=step_started (CapabilityType.INSPECT_VISUAL)
-  t=1791874187498 mission=mission-visual-inspect   robot=spot-01    event=mission_step_terminal (status=completed at step 0)
-  t=1791874187498 mission=mission-gas-detect       robot=fleetx-01  event=mission_assigned
-  t=1791874187498 mission=mission-gas-detect       robot=fleetx-01  event=step_started (CapabilityType.DETECT_GAS)
-  t=1791874187498 mission=mission-gas-detect       robot=fleetx-01  event=mission_step_terminal (status=completed at step 0)
-  t=1791874187498 mission=mission-thermal-inspect  robot=spot-01    event=mission_assigned
-  t=1791874187498 mission=mission-thermal-inspect  robot=spot-01    event=step_started (CapabilityType.INSPECT_THERMAL)
-  t=1791874187498 mission=mission-thermal-inspect  robot=spot-01    event=mission_step_terminal (status=completed at step 0)
+  t=1791950335529 mission=mission-visual-inspect   robot=spot-01    event=mission_assigned
+  t=1791950335529 mission=mission-visual-inspect   robot=spot-01    event=step_started (CapabilityType.INSPECT_VISUAL)
+  t=1791950335529 mission=mission-visual-inspect   robot=spot-01    event=mission_step_terminal (status=completed at step 0)
+  t=1791950335539 mission=mission-gas-detect       robot=fleetx-01  event=mission_assigned
+  t=1791950335539 mission=mission-gas-detect       robot=fleetx-01  event=step_started (CapabilityType.DETECT_GAS)
+  t=1791950335539 mission=mission-gas-detect       robot=fleetx-01  event=mission_step_terminal (status=completed at step 0)
+  t=1791950335539 mission=mission-thermal-inspect  robot=spot-01    event=mission_assigned
+  t=1791950335539 mission=mission-thermal-inspect  robot=spot-01    event=step_started (CapabilityType.INSPECT_THERMAL)
+  t=1791950335539 mission=mission-thermal-inspect  robot=spot-01    event=mission_step_terminal (status=completed at step 0)
 
 ========================================================================
 Result: 3 missions, 2 different OEM backends, 1 unchanged call path.
@@ -90,7 +90,25 @@ Resilience demo -- multi-step missions under four fault conditions
     step 1: completed
   final: completed (module=comms, probabilistic failures, same policy as scenario 2)
 
+========================================================================
+Delivery demo -- post-mission data capture, upload, and customer delivery
+========================================================================
+
+--- 1. Nominal: thermal inspection, data delivered to a real subscribed customer ---
+  delivery status: delivered
+  delivered to: ['acme-industrial']
+  mock-customer server actually received: {'customer_id': 'acme-industrial', 'mission_id': 'mission-thermal-for-delivery', 'package_filename': 'mission-report-mission-thermal-for-delivery.zip', 'robot_id': 'spot-01'}
+
+--- 2. Robot goes offline for the whole mission: mission itself fails, delivery is never attempted ---
+  (DeliveryService.deliver() is only reachable through a COMPLETED mission -- the publicly
+   reachable way to show 'data never makes it off the robot' is the mission failing outright;
+   the UPLOAD_FAILED status itself -- a mission that completes but whose data upload separately
+   fails -- is exercised directly in tests/test_data_delivery.py, which can force that exact
+   split via a FaultProfile the public API has no way to toggle mid-mission.)
+  mission final status: failed (module=comms, same retry policy, mission itself fails)
+  delivery record: None (None -- deliver() is never called for a non-COMPLETED mission)
+
 Fleet analytics (updated automatically after every mission -- no manual trigger):
-  total missions: 7, succeeded: 6, failed: 0, paused: 1, overall success rate: 85.7%
-  spot-01: 6 missions run, success rate 83.3%, 5 total retries
+  total missions: 9, succeeded: 7, failed: 1, paused: 1, overall success rate: 77.8%
+  spot-01: 8 missions run, success rate 75.0%, 8 total retries
   fleetx-01: 1 missions run, success rate 100.0%, 0 total retries

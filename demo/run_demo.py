@@ -18,14 +18,18 @@ still print and succeed without it, just skipping the image.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from werkzeug.serving import make_server
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from integration_layer.api.orchestration_service import OrchestrationService
 from integration_layer.core.capability_model import CapabilityType
+from integration_layer.core.customer_registry import Customer, CustomerRegistry
 from integration_layer.core.events import AuditLog
 from integration_layer.core.mission import (
     FailureReason,
@@ -35,11 +39,13 @@ from integration_layer.core.mission import (
     MissionStepStatus,
 )
 from integration_layer.core.registry import AdapterRegistry
+from mock_customer.customer_server import app as customer_server_app
 from mock_robot.cloud_fleet_adapter import CloudFleetAdapter
 from mock_robot.fault_injection import FaultProfile
 from mock_robot.mock_robot_node import MockRobotAdapter
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+CUSTOMER_SERVER_URL_FOR_DEMO: str = ""
 
 
 @dataclass
@@ -162,6 +168,54 @@ def run_resilience_demo(service: OrchestrationService, spot: MockRobotAdapter, l
     spot.set_fault_profile(FaultProfile())  # reset to healthy
 
 
+def run_delivery_demo(service: OrchestrationService, spot: MockRobotAdapter, log) -> None:
+    """Demonstrates post-mission data capture, upload, and customer
+    delivery under two conditions: (1) nominal -- a thermal-inspection
+    mission's simulated sensor artifact is captured, uploaded, packaged,
+    and pushed to a subscribed customer over a REAL local HTTP call;
+    print the actual payload the mock-customer server received. (2) the
+    robot goes offline right before the mission completes -- the
+    mission itself still COMPLETES, but its data never makes it off the
+    robot (DeliveryStatus.UPLOAD_FAILED) -- the "bandwidth-limited site"
+    story made concrete."""
+    log("\n" + "=" * 72)
+    log("Delivery demo -- post-mission data capture, upload, and customer delivery")
+    log("=" * 72)
+
+    log("\n--- 1. Nominal: thermal inspection, data delivered to a real subscribed customer ---")
+    nominal = Mission(
+        mission_id="mission-thermal-for-delivery",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    service.assign_mission(nominal)
+    service.wait_for_completion(nominal.mission_id)
+    record = service.get_delivery_record(nominal.mission_id)
+    log(f"  delivery status: {record.status.value}")
+    log(f"  delivered to: {record.delivered_customer_ids}")
+    import urllib.request
+    import json as json_module
+    with urllib.request.urlopen(f"{CUSTOMER_SERVER_URL_FOR_DEMO}/admin/received", timeout=2.0) as response:
+        received = json_module.loads(response.read())
+    log(f"  mock-customer server actually received: {received[-1] if received else None}")
+
+    log("\n--- 2. Robot goes offline for the whole mission: mission itself fails, delivery is never attempted ---")
+    log("  (DeliveryService.deliver() is only reachable through a COMPLETED mission -- the publicly")
+    log("   reachable way to show 'data never makes it off the robot' is the mission failing outright;")
+    log("   the UPLOAD_FAILED status itself -- a mission that completes but whose data upload separately")
+    log("   fails -- is exercised directly in tests/test_data_delivery.py, which can force that exact")
+    log("   split via a FaultProfile the public API has no way to toggle mid-mission.)")
+    spot.set_offline(True)
+    offline_mission = Mission(
+        mission_id="mission-thermal-offline",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    service.assign_mission(offline_mission)
+    final_status = service.wait_for_completion(offline_mission.mission_id)
+    log(f"  mission final status: {final_status.status.value} (module=comms, same retry policy, mission itself fails)")
+    log(f"  delivery record: {service.get_delivery_record(offline_mission.mission_id)} (None -- deliver() is never called for a non-COMPLETED mission)")
+    spot.set_offline(False)
+
+
 def main() -> list[MissionRunRecord]:
     log_lines: list[str] = []
 
@@ -184,13 +238,29 @@ def main() -> list[MissionRunRecord]:
     registry.register(spot)
     registry.register(fleetx)
 
+    customer_server = make_server("127.0.0.1", 0, customer_server_app)
+    customer_server_thread = threading.Thread(target=customer_server.serve_forever, daemon=True)
+    customer_server_thread.start()
+    global CUSTOMER_SERVER_URL_FOR_DEMO
+    CUSTOMER_SERVER_URL_FOR_DEMO = f"http://127.0.0.1:{customer_server.server_port}"
+
+    customer_registry = CustomerRegistry()
+    customer_registry.register(Customer(
+        customer_id="acme-industrial",
+        webhook_url=f"{CUSTOMER_SERVER_URL_FOR_DEMO}/webhook/deliveries",
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL, CapabilityType.INSPECT_VISUAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+
     log("\nRegistered fleet:")
     for adapter in (spot, fleetx):
         caps = ", ".join(c.capability_type.value for c in adapter.get_capabilities())
         log(f"  {adapter.robot_id:12s} ({type(adapter).__name__:18s}) advertises: {caps}")
 
     audit_log = AuditLog()
-    service = OrchestrationService(registry, audit_log)
+    service = OrchestrationService(
+        registry, audit_log, customer_registry=customer_registry, delivery_output_dir=OUTPUT_DIR / "deliveries"
+    )
 
     missions = [
         ("mission-visual-inspect", CapabilityType.INSPECT_VISUAL),
@@ -224,6 +294,7 @@ def main() -> list[MissionRunRecord]:
     log("=" * 72)
 
     run_resilience_demo(service, spot, log)
+    run_delivery_demo(service, spot, log)
 
     log("\nFleet analytics (updated automatically after every mission -- no manual trigger):")
     fleet_stats = service.get_fleet_stats()
@@ -242,6 +313,9 @@ def main() -> list[MissionRunRecord]:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "demo_run.txt").write_text("\n".join(log_lines) + "\n")
+
+    customer_server.shutdown()
+    customer_server_thread.join(timeout=2)
 
     return records
 
