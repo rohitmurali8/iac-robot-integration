@@ -11,7 +11,9 @@ capability-based routing needs real capability advertisement.
 
 from __future__ import annotations
 
+from integration_layer.core.artifact_capture import ArtifactCapture
 from integration_layer.core.capability_model import CapabilityType
+from integration_layer.core.data_delivery import DeliveryRecord, DeliveryStatus
 from integration_layer.core.events import AuditLog
 from integration_layer.core.mission import (
     FailureReason,
@@ -325,3 +327,104 @@ def test_resolve_adapter_honors_explicit_pin_for_step_zero():
     executor.start_mission(mission)
 
     assert mission.assigned_robot_id == "pin-second"
+
+
+class StubDeliveryService:
+    """Scripted stand-in for DeliveryService -- isolates MissionExecutor's
+    terminal-hook wiring (does it call deliver() exactly once, only on
+    COMPLETED, with the right arguments?) from DeliveryService's own
+    already-tested upload/push logic (test_data_delivery.py)."""
+
+    def __init__(self):
+        self.deliver_calls = []  # list of (mission_id, final_status.status, artifacts)
+
+    def deliver(self, mission, final_status, step_history, artifacts, retry_counts_by_module, robot_stats_snapshot):
+        self.deliver_calls.append((mission.mission_id, final_status.status, list(artifacts)))
+        return DeliveryRecord(
+            mission_id=mission.mission_id,
+            status=DeliveryStatus.DELIVERED,
+            package_path=None,
+            delivered_customer_ids=["acme"],
+            failed_customer_ids=[],
+        )
+
+
+def test_continue_mission_captures_artifact_for_completed_sensor_step():
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    registry.register(adapter)
+    analytics = MissionAnalytics()
+    mission = Mission(
+        mission_id="m-capture",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    mission.assigned_robot_id = "spot-01"
+    adapter.execute_mission_step("m-capture", 0, mission.steps[0])
+
+    artifact_capture = ArtifactCapture()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=analytics, artifact_capture=artifact_capture)
+
+    executor.continue_mission(mission, 0)
+
+    # drain() both proves capture happened AND that MissionExecutor itself
+    # already drained it (as part of the terminal hook) -- so a second
+    # drain here must come back empty.
+    assert artifact_capture.drain("m-capture") == []
+
+
+def test_continue_mission_calls_delivery_service_exactly_once_on_completed():
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    registry.register(adapter)
+    analytics = MissionAnalytics()
+    mission = Mission(
+        mission_id="m-deliver",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    mission.assigned_robot_id = "spot-01"
+    adapter.execute_mission_step("m-deliver", 0, mission.steps[0])
+
+    delivery_service = StubDeliveryService()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=analytics, delivery_service=delivery_service)
+
+    executor.continue_mission(mission, 0)
+    executor.continue_mission(mission, 0)  # repeated call must not re-trigger delivery
+
+    assert len(delivery_service.deliver_calls) == 1
+    mission_id, status, artifacts = delivery_service.deliver_calls[0]
+    assert mission_id == "m-deliver"
+    assert status == MissionStatus.COMPLETED
+    assert len(artifacts) == 1
+
+    record = executor.get_delivery_record("m-deliver")
+    assert record.status == DeliveryStatus.DELIVERED
+
+
+def test_continue_mission_never_calls_delivery_service_on_sensor_fault_pause():
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    adapter.set_sensor_failed(CapabilityType.INSPECT_THERMAL)
+    registry.register(adapter)
+    analytics = MissionAnalytics()
+    mission = Mission(
+        mission_id="m-paused",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    mission.assigned_robot_id = "spot-01"
+    adapter.execute_mission_step("m-paused", 0, mission.steps[0])
+
+    delivery_service = StubDeliveryService()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=analytics, delivery_service=delivery_service)
+
+    status = executor.continue_mission(mission, 0)
+
+    assert status.status == MissionStatus.PAUSED_FOR_INTERVENTION
+    assert delivery_service.deliver_calls == []
+    assert executor.get_delivery_record("m-paused") is None
+
+
+def test_get_delivery_record_returns_none_for_unknown_mission():
+    registry = AdapterRegistry()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=MissionAnalytics())
+
+    assert executor.get_delivery_record("never-ran") is None

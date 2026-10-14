@@ -28,10 +28,13 @@ from integration_layer.core.mission import (
     FailureReason,
     Mission,
     MissionStatus,
+    MissionStep,
     MissionStepStatus,
     SystemModule,
 )
 from integration_layer.core.mission_analytics import MissionAnalytics
+from integration_layer.core.artifact_capture import SENSOR_CAPABILITIES, ArtifactCapture
+from integration_layer.core.data_delivery import DeliveryRecord, DeliveryService
 from integration_layer.core.registry import AdapterRegistry
 from integration_layer.core.step_runner import ProgressCallback, StepRunner
 
@@ -52,7 +55,10 @@ class MissionExecutor:
     audit_log: AuditLog
     analytics: MissionAnalytics
     step_runner: StepRunner = field(default_factory=StepRunner)
+    artifact_capture: ArtifactCapture = field(default_factory=ArtifactCapture)
+    delivery_service: DeliveryService | None = None
     _mission_outcomes_recorded: set = field(default_factory=set, init=False, repr=False)
+    _delivery_records: dict = field(default_factory=dict, init=False, repr=False)
 
     def resolve_adapter(self, mission: Mission, capability_type) -> RobotAdapter:
         """Step-0-only resolution: honors an explicit mission.assigned_robot_id
@@ -128,6 +134,7 @@ class MissionExecutor:
             adapter, mission.mission_id, step_index, step, wrapped
         )
         step_history.append(status)
+        self._maybe_capture_artifact(mission.mission_id, step_index, step, status)
 
         while status.status == MissionStatus.COMPLETED and step_index + 1 < len(mission.steps):
             step_index += 1
@@ -139,6 +146,7 @@ class MissionExecutor:
             wrapped = self._wrap_progress(mission.mission_id, adapter.robot_id, on_progress, retry_counts_by_module)
             status = self.step_runner.start(adapter, mission.mission_id, step_index, step, wrapped)
             step_history.append(status)
+            self._maybe_capture_artifact(mission.mission_id, step_index, step, status)
 
         self._record_event(
             mission.mission_id,
@@ -152,8 +160,35 @@ class MissionExecutor:
             self.analytics.record_mission_outcome(
                 mission.assigned_robot_id, status, step_history, retry_counts_by_module
             )
+            artifacts = self.artifact_capture.drain(mission.mission_id)
+            if self.delivery_service is not None and status.status == MissionStatus.COMPLETED:
+                self._delivery_records[mission.mission_id] = self.delivery_service.deliver(
+                    mission,
+                    status,
+                    step_history,
+                    artifacts,
+                    retry_counts_by_module,
+                    self.analytics.get_robot_stats(mission.assigned_robot_id),
+                )
 
         return status
+
+    def _maybe_capture_artifact(
+        self, mission_id: str, step_index: int, step: MissionStep, status: MissionStepStatus
+    ) -> None:
+        """Captures a simulated sensor artifact the instant a sensor-
+        capability step reaches COMPLETED -- never for NAVIGATE or any
+        other non-terminal/non-success status. No network, no
+        dependency on delivery_service being configured at all."""
+        if status.status == MissionStatus.COMPLETED and step.capability_type in SENSOR_CAPABILITIES:
+            self.artifact_capture.capture(mission_id, step_index, step.capability_type)
+
+    def get_delivery_record(self, mission_id: str) -> DeliveryRecord | None:
+        """None for a mission that hasn't reached a terminal outcome
+        yet, that reached a non-COMPLETED terminal outcome (delivery is
+        never attempted for those), or that was run with no
+        delivery_service configured at all."""
+        return self._delivery_records.get(mission_id)
 
     def _wrap_progress(
         self,
