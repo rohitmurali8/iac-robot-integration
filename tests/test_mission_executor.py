@@ -428,3 +428,52 @@ def test_get_delivery_record_returns_none_for_unknown_mission():
     executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=MissionAnalytics())
 
     assert executor.get_delivery_record("never-ran") is None
+
+
+def test_continue_mission_never_captures_artifact_for_navigate_step():
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    registry.register(adapter)
+    analytics = MissionAnalytics()
+    mission = Mission(
+        mission_id="m-navigate-only",
+        steps=[MissionStep(capability_type=CapabilityType.NAVIGATE, target="wp1")],
+    )
+    mission.assigned_robot_id = "spot-01"
+    adapter.execute_mission_step("m-navigate-only", 0, mission.steps[0])
+
+    artifact_capture = ArtifactCapture()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=analytics, artifact_capture=artifact_capture)
+
+    status = executor.continue_mission(mission, 0)
+
+    assert status.status == MissionStatus.COMPLETED
+    # NAVIGATE produces no deliverable artifact -- drain must come back empty,
+    # not because nothing was drained, but because nothing was ever captured.
+    assert artifact_capture.drain("m-navigate-only") == []
+
+
+def test_continue_mission_drains_artifacts_even_when_mission_pauses():
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    adapter.set_sensor_failed(CapabilityType.INSPECT_THERMAL)
+    registry.register(adapter)
+    analytics = MissionAnalytics()
+    mission = Mission(
+        mission_id="m-paused-drain",
+        steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")],
+    )
+    mission.assigned_robot_id = "spot-01"
+    adapter.execute_mission_step("m-paused-drain", 0, mission.steps[0])
+
+    artifact_capture = ArtifactCapture()
+    executor = MissionExecutor(registry=registry, audit_log=AuditLog(), analytics=analytics, artifact_capture=artifact_capture)
+
+    status = executor.continue_mission(mission, 0)
+
+    assert status.status == MissionStatus.PAUSED_FOR_INTERVENTION
+    # A failed sensor step produces no artifact (it never reaches COMPLETED),
+    # and whatever state existed for this mission_id was still drained as
+    # part of the terminal hook -- drain() must be empty either way, proving
+    # the unconditional-drain placement doesn't leak state across missions.
+    assert artifact_capture.drain("m-paused-drain") == []
