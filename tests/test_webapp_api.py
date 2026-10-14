@@ -192,3 +192,55 @@ def test_reset_also_clears_stats(client):
     client.post("/api/reset")
 
     assert client.get("/api/stats/fleet").get_json()["total_missions"] == 0
+
+
+def test_mission_delivery_endpoint_reflects_completed_mission(client):
+    res = client.post("/api/missions", json={"capability": "inspect_thermal"})
+    mission_id = res.get_json()["mission_id"]
+
+    delivery_res = client.get(f"/api/missions/{mission_id}/delivery")
+    delivery = delivery_res.get_json()
+
+    assert delivery_res.status_code == 200
+    assert delivery["mission_id"] == mission_id
+    assert delivery["status"] in ("delivered", "partially_delivered", "push_failed", "no_subscribers")
+
+
+def test_mission_delivery_endpoint_unknown_mission_returns_404(client):
+    res = client.get("/api/missions/does-not-exist/delivery")
+
+    assert res.status_code == 404
+    assert "error" in res.get_json()
+
+
+def test_robot_deliveries_endpoint_lists_that_robots_deliveries(client):
+    client.post("/api/missions", json={"capability": "inspect_thermal"})
+
+    res = client.get("/api/robots/spot-01/deliveries")
+    deliveries = res.get_json()
+
+    assert res.status_code == 200
+    assert len(deliveries) >= 1
+    assert deliveries[0]["mission_id"]
+
+
+def test_robot_deliveries_endpoint_unknown_robot_returns_404(client):
+    res = client.get("/api/robots/does-not-exist/deliveries")
+
+    assert res.status_code == 404
+
+
+def test_download_delivery_package_returns_zip_bytes(client):
+    res = client.post("/api/missions", json={"capability": "inspect_thermal"})
+    mission_id = res.get_json()["mission_id"]
+
+    download_res = client.get(f"/api/deliveries/{mission_id}/download")
+
+    assert download_res.status_code == 200
+    assert download_res.data[:2] == b"PK"  # zip file magic bytes
+
+
+def test_download_delivery_package_unknown_mission_returns_404(client):
+    res = client.get("/api/deliveries/does-not-exist/download")
+
+    assert res.status_code == 404

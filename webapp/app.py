@@ -24,14 +24,17 @@ import json
 import queue
 import threading
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_file
+from werkzeug.serving import make_server
 
 from integration_layer.api.orchestration_service import MissionExecutionError, OrchestrationService
 from integration_layer.core.capability_model import CapabilityType
+from integration_layer.core.customer_registry import Customer, CustomerRegistry
 from integration_layer.core.events import AuditLog
 from integration_layer.core.mission import FailureReason, Mission, MissionStep
 from integration_layer.core.registry import AdapterRegistry
 from integration_layer.core.stats_query import AnthropicStatsQueryEngine, get_query_engine
+from mock_customer.customer_server import app as customer_server_app
 from mock_robot.cloud_fleet_adapter import CloudFleetAdapter
 from mock_robot.mock_robot_node import MockRobotAdapter
 
@@ -42,7 +45,25 @@ app = Flask(__name__)
 # single script run.
 registry = AdapterRegistry()
 audit_log = AuditLog()
-service = OrchestrationService(registry, audit_log)
+
+# A second, real local Flask server simulating where delivered mission
+# reports actually land -- started once, in a background thread, for
+# the life of this process. OS-assigned port (0) avoids clashing with
+# webapp's own port or any other process on this machine.
+# threaded=True: this server will field delivery pushes from
+# DeliveryService while the main webapp is concurrently serving GUI
+# requests (also threaded, see bottom of file) -- single-threaded
+# werkzeug would otherwise serialize those deliveries. The resulting
+# concurrent access to customer_server.py's module-level _received/
+# _outage globals relies on the GIL the same way _live_mission_queues
+# below does; no new locking added here either.
+_customer_server = make_server("127.0.0.1", 0, customer_server_app, threaded=True)
+_customer_server_thread = threading.Thread(target=_customer_server.serve_forever, daemon=True)
+_customer_server_thread.start()
+CUSTOMER_SERVER_URL = f"http://127.0.0.1:{_customer_server.server_port}"
+
+customer_registry = CustomerRegistry()
+service = OrchestrationService(registry, audit_log, customer_registry=customer_registry)
 
 OEM_META = {
     "MockRobotAdapter": {"label": "Local / ROS2-style OEM", "color": "#2f6fed"},
@@ -58,6 +79,24 @@ def _seed_fleet() -> None:
 
 
 _seed_fleet()
+
+
+def _seed_customers() -> None:
+    customer_registry.register(Customer(
+        customer_id="acme-industrial",
+        webhook_url=f"{CUSTOMER_SERVER_URL}/webhook/deliveries",
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_VISUAL, CapabilityType.INSPECT_THERMAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+    customer_registry.register(Customer(
+        customer_id="chemsafe-corp",
+        webhook_url=f"{CUSTOMER_SERVER_URL}/webhook/deliveries",
+        subscribed_capabilities=frozenset({CapabilityType.DETECT_GAS}),
+        site_robot_ids=frozenset({"fleetx-01"}),
+    ))
+
+
+_seed_customers()
 
 
 def _fleet_snapshot() -> list[dict]:
@@ -120,6 +159,16 @@ def _fleet_stats_dict(fs) -> dict:
         "total_paused": fs.total_paused,
         "overall_success_rate": fs.overall_success_rate,
         "failures_by_module": {k.value: v for k, v in fs.failures_by_module.items()},
+    }
+
+
+def _delivery_dict(record) -> dict:
+    return {
+        "mission_id": record.mission_id,
+        "status": record.status.value,
+        "has_package": record.package_path is not None,
+        "delivered_customer_ids": record.delivered_customer_ids,
+        "failed_customer_ids": record.failed_customer_ids,
     }
 
 
@@ -339,6 +388,42 @@ def api_robot_stats(robot_id: str):
     return jsonify(_robot_stats_dict(service.get_robot_stats(robot_id)))
 
 
+@app.get("/api/missions/<mission_id>/delivery")
+def api_mission_delivery(mission_id: str):
+    record = service.get_delivery_record(mission_id)
+    if record is None:
+        return jsonify({"error": f"no delivery record for mission_id {mission_id!r}"}), 404
+    return jsonify(_delivery_dict(record))
+
+
+@app.get("/api/robots/<robot_id>/deliveries")
+def api_robot_deliveries(robot_id: str):
+    if registry.get(robot_id) is None:
+        return jsonify({"error": f"unknown robot_id {robot_id!r}"}), 404
+
+    mission_ids = audit_log.mission_ids_for_robot(robot_id)
+    deliveries = []
+    for mission_id in mission_ids:
+        record = service.get_delivery_record(mission_id)
+        if record is not None:
+            deliveries.append(_delivery_dict(record))
+    return jsonify(deliveries)
+
+
+@app.get("/api/deliveries/<mission_id>/download")
+def api_download_delivery(mission_id: str):
+    record = service.get_delivery_record(mission_id)
+    if record is None or record.package_path is None:
+        return jsonify({"error": f"no downloadable package for mission_id {mission_id!r}"}), 404
+    # package_path is written relative to the process's cwd (see
+    # OrchestrationService's _DEFAULT_DELIVERY_OUTPUT_DIR), but Flask's
+    # send_file resolves relative paths against app.root_path
+    # (webapp/), not cwd -- resolve to an absolute path first so the
+    # two don't disagree about where the file landed.
+    absolute_package_path = record.package_path.resolve()
+    return send_file(absolute_package_path, as_attachment=True, download_name=absolute_package_path.name)
+
+
 @app.post("/api/stats/query")
 def api_stats_query():
     payload = request.get_json(force=True)
@@ -363,7 +448,9 @@ def api_reset():
     registry.clear()
     audit_log.clear()
     _seed_fleet()
-    service = OrchestrationService(registry, audit_log)
+    customer_registry.clear()
+    _seed_customers()
+    service = OrchestrationService(registry, audit_log, customer_registry=customer_registry)
     return jsonify({"fleet": _fleet_snapshot()})
 
 
