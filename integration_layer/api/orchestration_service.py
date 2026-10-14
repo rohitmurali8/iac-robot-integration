@@ -24,10 +24,14 @@ exact content, so this is a non-breaking, deliberate divergence.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from integration_layer.core.events import AuditEvent, AuditLog
 from integration_layer.core.mission import Mission, MissionStepStatus
 from integration_layer.core.mission_analytics import FleetStats, MissionAnalytics, RobotStats
 from integration_layer.core.mission_executor import MissionExecutionError, MissionExecutor
+from integration_layer.core.customer_registry import CustomerRegistry
+from integration_layer.core.data_delivery import DeliveryRecord, DeliveryService
 from integration_layer.core.registry import AdapterRegistry
 from integration_layer.core.step_runner import ProgressCallback, StepRunner
 
@@ -35,6 +39,7 @@ __all__ = ["OrchestrationService", "MissionExecutionError"]
 
 _DEFAULT_MAX_POLLS = 10
 _DEFAULT_POLL_INTERVAL_S = 0.0
+_DEFAULT_DELIVERY_OUTPUT_DIR = Path("deliveries")
 
 
 class OrchestrationService:
@@ -47,11 +52,17 @@ class OrchestrationService:
         registry: AdapterRegistry,
         audit_log: AuditLog,
         analytics: MissionAnalytics | None = None,
+        customer_registry: CustomerRegistry | None = None,
+        delivery_output_dir: Path | None = None,
     ) -> None:
         self._registry = registry
         self._audit_log = audit_log
         self._analytics = analytics if analytics is not None else MissionAnalytics()
-        self._executor = MissionExecutor(registry, audit_log, self._analytics)
+        self._customer_registry = customer_registry if customer_registry is not None else CustomerRegistry()
+        delivery_service = DeliveryService(
+            registry, self._customer_registry, delivery_output_dir or _DEFAULT_DELIVERY_OUTPUT_DIR
+        )
+        self._executor = MissionExecutor(registry, audit_log, self._analytics, delivery_service=delivery_service)
         self._mission_progress: dict[str, tuple[str, int]] = {}
         self._mission_step_history: dict[str, list[MissionStepStatus]] = {}
         self._missions: dict[str, Mission] = {}
@@ -147,6 +158,19 @@ class OrchestrationService:
     def get_fleet_stats(self) -> FleetStats:
         return self._analytics.get_fleet_stats()
 
+    @property
+    def customer_registry(self) -> CustomerRegistry:
+        """The SAME CustomerRegistry instance this service's
+        DeliveryService consults -- exposed so a caller (e.g. webapp's
+        startup seeding) can register customers against the exact
+        registry that will actually be checked at delivery time,
+        whether this service constructed its own default registry or
+        was handed one explicitly."""
+        return self._customer_registry
+
+    def get_delivery_record(self, mission_id: str) -> DeliveryRecord | None:
+        return self._executor.get_delivery_record(mission_id)
+
     def request_operator_intervention(self, mission_id: str, robot_id: str, reason: str) -> None:
         """Called when a human pauses a mission for manual handoff/teleop.
         Recorded into the same audit schema regardless of which tool (in-
@@ -184,7 +208,13 @@ class OrchestrationService:
         if max_polls == _DEFAULT_MAX_POLLS and poll_interval_s == _DEFAULT_POLL_INTERVAL_S:
             return self._executor
         step_runner = StepRunner(max_polls=max_polls, poll_interval_s=poll_interval_s)
-        return MissionExecutor(self._registry, self._audit_log, self._analytics, step_runner=step_runner)
+        return MissionExecutor(
+            self._registry,
+            self._audit_log,
+            self._analytics,
+            step_runner=step_runner,
+            delivery_service=self._executor.delivery_service,
+        )
 
     def _record_event(self, mission_id: str, robot_id: str, event_type: str, detail: str = "") -> None:
         self._audit_log.record(

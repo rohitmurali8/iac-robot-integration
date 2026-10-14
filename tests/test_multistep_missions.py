@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from integration_layer.api.orchestration_service import OrchestrationService
 from integration_layer.core.capability_model import CapabilityType
+from integration_layer.core.customer_registry import Customer, CustomerRegistry
+from integration_layer.core.data_delivery import DeliveryStatus
 from integration_layer.core.events import AuditLog
 from integration_layer.core.mission import Mission, MissionStatus, MissionStep
 from integration_layer.core.mission_analytics import MissionAnalytics
@@ -270,3 +272,53 @@ def test_run_mission_with_progress_streams_live_updates():
     last = collected[-1]
     assert last.status == final_status.status
     assert last.failure_reason == final_status.failure_reason
+
+
+def test_orchestration_service_delivers_to_subscribed_customer_end_to_end(tmp_path):
+    registry = AdapterRegistry()
+    adapter = MockRobotAdapter(robot_id="spot-01", payload={"thermal_camera"})
+    registry.register(adapter)
+
+    customer_registry = CustomerRegistry()
+    customer_registry.register(Customer(
+        customer_id="acme",
+        webhook_url="http://example.invalid/webhook",  # unreachable on purpose -- this test only checks UPLOAD/packaging path shape
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+
+    service = OrchestrationService(
+        registry, AuditLog(), customer_registry=customer_registry, delivery_output_dir=tmp_path
+    )
+    mission = Mission(mission_id="m-e2e", steps=[MissionStep(capability_type=CapabilityType.INSPECT_THERMAL, target="wp1")])
+
+    service.assign_mission(mission)
+    final_status = service.wait_for_completion("m-e2e")
+
+    assert final_status.status == MissionStatus.COMPLETED
+    record = service.get_delivery_record("m-e2e")
+    assert record is not None
+    assert record.package_path.exists()
+    # Push fails (unreachable URL) but upload/packaging succeeded -- proves
+    # OrchestrationService's wiring reaches all the way into DeliveryService.
+    assert record.status == DeliveryStatus.PUSH_FAILED
+
+
+def test_orchestration_service_customer_registry_property_is_shared():
+    registry = AdapterRegistry()
+    service = OrchestrationService(registry, AuditLog())
+
+    service.customer_registry.register(Customer(
+        customer_id="acme", webhook_url="http://example.invalid/webhook",
+        subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
+        site_robot_ids=frozenset({"spot-01"}),
+    ))
+
+    assert [c.customer_id for c in service.customer_registry.all_customers()] == ["acme"]
+
+
+def test_get_delivery_record_returns_none_for_unknown_mission():
+    registry = AdapterRegistry()
+    service = OrchestrationService(registry, AuditLog())
+
+    assert service.get_delivery_record("never-ran") is None
