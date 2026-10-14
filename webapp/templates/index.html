@@ -116,6 +116,12 @@
   </section>
 
   <section class="wide">
+    <h2>Deliveries</h2>
+    <p style="font-size:12px; color:#9aa3b5; margin:0 0 10px;">Per-robot mission data packages and customer webhook delivery status. Click "View mission log" on a robot card above, then look here.</p>
+    <div id="deliveries-body"></div>
+  </section>
+
+  <section class="wide">
     <h2>Fleet analytics</h2>
     <div class="stats-grid" id="fleet-stats-grid"></div>
     <div id="module-breakdown"></div>
@@ -245,7 +251,10 @@ function wireFleetControls() {
   });
 
   document.querySelectorAll("[data-mission-log-btn]").forEach(btn => {
-    btn.addEventListener("click", () => loadMissionLog(btn.dataset.missionLogBtn));
+    btn.addEventListener("click", () => {
+      loadMissionLog(btn.dataset.missionLogBtn);
+      loadDeliveries(btn.dataset.missionLogBtn);
+    });
   });
 }
 
@@ -297,6 +306,39 @@ async function loadMissionLog(robotId) {
             <td>${m.steps_reached}</td>
             <td><span class="pill ${statusPillClass(m.final_status)}">${m.final_status || "-"}</span></td>
             <td>${m.final_failure_reason && m.final_failure_reason !== "none" ? m.final_failure_reason : ""}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function deliveryPillClass(status) {
+  if (status === "delivered") return "pill-completed";
+  if (status === "push_failed" || status === "upload_failed") return "pill-failed";
+  return "pill-progress";
+}
+
+async function loadDeliveries(robotId) {
+  const res = await fetch(`/api/robots/${robotId}/deliveries`);
+  const deliveries = await res.json();
+  const body = document.getElementById("deliveries-body");
+  if (deliveries.length === 0) {
+    body.innerHTML = `<p style="font-size:12px; color:#9aa3b5;">${robotId} has no delivered missions yet.</p>`;
+    return;
+  }
+  body.innerHTML = `
+    <h3 style="font-size:13px; margin: 10px 0 6px;">${robotId}'s deliveries</h3>
+    <table>
+      <thead><tr><th>Mission</th><th>Status</th><th>Delivered to</th><th>Failed for</th><th>Package</th></tr></thead>
+      <tbody>
+        ${deliveries.map(d => `
+          <tr>
+            <td>${d.mission_id}</td>
+            <td><span class="pill ${deliveryPillClass(d.status)}">${d.status}</span></td>
+            <td>${d.delivered_customer_ids.join(", ") || "-"}</td>
+            <td>${d.failed_customer_ids.join(", ") || "-"}</td>
+            <td>${d.has_package ? `<a href="/api/deliveries/${d.mission_id}/download" style="color:#8fb4ff;">download</a>` : "-"}</td>
           </tr>
         `).join("")}
       </tbody>
