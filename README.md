@@ -32,6 +32,9 @@ paused-for-intervention counts), and an "Ask about the fleet"
 natural-language query box. The query box works out of the box with a
 deterministic template engine; set `ANTHROPIC_API_KEY` (and
 `pip install anthropic`) for full LLM-powered answers instead.
+It also now shows a Deliveries panel, per robot: the mission data
+package's upload/webhook-push status and a download link, driven by the
+same real backend described below.
 
 **Recorded evidence it actually works**, captured by driving the real app
 in real headless Chromium via Playwright (`webapp/record_gui_demo.py`) —
@@ -102,6 +105,59 @@ at the end; in `webapp/`, the health panel, fault-injection controls,
 live multi-step mission execution, Mission Log, Fleet Analytics panel,
 and Ask-about-the-fleet box are all driven by the same real backend.
 
+## Post-mission data capture, upload, and customer delivery
+
+Beyond executing missions and tracking their outcomes, the system now
+captures what each mission actually *produced* and gets it to the
+customers who asked for it — end to end, no manual step in between.
+
+- **Local, no-network artifact capture, the instant each sensor step
+  completes.** Any step with capability `inspect_visual`,
+  `inspect_thermal`, or `detect_gas` captures a simulated sensor artifact
+  (image/thermal-image/gas-reading file) the moment it finishes, via
+  `ArtifactCapture` (`integration_layer/core/artifact_capture.py`). This
+  is pure local file I/O — no network involved, nothing to retry.
+- **One batch upload at mission end, governed by the SAME resilience
+  policy as mission execution.** The moment a mission reaches
+  `COMPLETED`, `MissionExecutor` automatically uploads the mission's
+  captured artifacts from "robot" to "platform" — the one
+  network-dependent leg of this flow — subject to the same
+  `FaultProfile` and retried via the same `retry_policy` COMMS strategy
+  that already governs mission-step execution. Nothing new to configure,
+  nothing new to reason about: a flaky or offline robot behaves the same
+  way for its data as it does for its mission steps. A robot that goes
+  offline right as its mission completes can still COMPLETE the mission
+  while its data never makes it off the robot
+  (`DeliveryStatus.UPLOAD_FAILED`) — see `demo/run_demo.py`'s delivery
+  demo section (`run_delivery_demo`) for both the nominal and
+  offline-at-completion stories played out against the real code.
+- **Packaging and customer delivery.** On a successful upload,
+  `DeliveryPackager` builds a `mission-report-<id>.zip` (manifest +
+  artifact files), and `CustomerRegistry`
+  (`integration_layer/core/customer_registry.py`) finds every customer
+  subscribed to that robot/capability combination. Each matched customer
+  gets a real local HTTP webhook push — retried via the same COMMS
+  policy — against `mock_customer/customer_server.py`, a genuinely
+  separate, real local Flask process simulating a customer's receiving
+  system, not a mocked call.
+- **See it in the GUI.** The dashboard's new Deliveries panel shows, per
+  robot, mission data package status and a download link, backed by
+  three new endpoints: `GET /api/missions/<id>/delivery`,
+  `GET /api/robots/<id>/deliveries`, and
+  `GET /api/deliveries/<id>/download`.
+- **Production mapping and scaling path, stated explicitly rather than
+  left implied:** the downloadable zip here would really be an object in
+  S3 behind a presigned URL, not a file assembled and held by this
+  process. The webhook push would really hit the customer's registered
+  AWS API Gateway/EventBridge endpoint — not implemented here, and
+  notably there's no payload signing or auth on the webhook push in this
+  PoC, a documented gap rather than an oversight. At real scale, bundling
+  bytes into a per-mission zip doesn't hold up: mission metadata would
+  live in a document/relational store with artifacts in object storage
+  referenced by key, not bundled together, and bulk analytics export
+  across many missions would use Parquet/Avro rather than JSON, for the
+  same reason the audit log is indexed rather than scanned.
+
 ## Proof of concept (CLI form): what it proves and how to run it
 
 Two robots, two different adapter implementations, same platform API:
@@ -122,7 +178,7 @@ crosses that boundary.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install pytest matplotlib pillow   # pillow only needed for the video
-.venv/bin/python -m pytest tests/ -v             # 155/155 — conformance + platform-agnosticism + retry/fault-injection/analytics/LLM-query
+.venv/bin/python -m pytest tests/ -v             # 195/195 — conformance + platform-agnosticism + retry/fault-injection/analytics/LLM-query/data-delivery
 .venv/bin/python demo/run_demo.py                # runs the demo, writes demo/output/
 .venv/bin/python demo/make_pipeline_video.py      # records a video of the pipeline running
 ```
@@ -190,8 +246,16 @@ contract either way.
 ## What's real vs. illustrative
 
 - **Runs, is tested, and is demoed**: everything under `integration_layer/`
-  (except `adapters/ros2_generic/`), `mock_robot/`, `tests/`, `demo/`, and
-  `webapp/`. Pure Python, no ROS2/hardware dependency.
+  (except `adapters/ros2_generic/`), `mock_robot/`, `mock_customer/`,
+  `tests/`, `demo/`, and `webapp/`. Pure Python, no ROS2/hardware
+  dependency.
+- **`mock_customer/customer_server.py` is a real local HTTP process**,
+  not a mocked call: it's a genuine Flask app run in a background thread,
+  hit with real HTTP requests in `tests/test_customer_server.py` and
+  `tests/test_data_delivery.py`, and used the same way by `webapp/`'s
+  live delivery flow. The AWS S3/API-Gateway production mapping described
+  in "Post-mission data capture, upload, and customer delivery" above is
+  illustrative only — not built, not called anywhere in this repo.
 - **Illustrative, not built or run**: `integration_layer/adapters/ros2_generic/adapter.py`
   and everything in `cpp_nodes/`. Written against the real `rclpy`/`rclcpp`
   API surface for correctness of shape — implementing the same
@@ -209,11 +273,18 @@ schemas/mission.proto                # the canonical wire contract
 integration_layer/
   core/                              # capability model, mission/status schema,
                                      # adapter interface, registry, audit log
+    adapter_base.py                  # the RobotAdapter interface both OEM adapters implement
     retry_policy.py                 # module-aware retry policy table
     step_runner.py                  # single-step execution, owns its own retries
     mission_executor.py             # cross-step sequencing + post-mission analytics hook
     mission_analytics.py            # incremental fleet/robot statistics
     stats_query.py                  # template + Anthropic LLM query engines
+    artifact_capture.py             # local, no-network per-step simulated sensor capture
+    customer_registry.py            # which customers get which mission's delivered data
+    data_delivery.py                # two-phase upload+push delivery, both retried via retry_policy
+    events.py                       # audit log event shape
+    mission.py                      # Mission/MissionStep schema
+    registry.py                     # fleet/capability registry
   adapters/ros2_generic/adapter.py  # ROS2 worked example (illustrative, see above)
   api/orchestration_service.py      # thin facade over MissionExecutor
 cpp_nodes/                           # latency-critical ROS2 nodes (illustrative)
@@ -221,6 +292,8 @@ mock_robot/
   mock_robot_node.py                # OEM adapter #1: local/ROS2-style
   cloud_fleet_adapter.py            # OEM adapter #2: cloud/REST-style
   fault_injection.py                # hybrid deterministic + probabilistic FaultProfile
+mock_customer/
+  customer_server.py                 # real local Flask app simulating a customer's receiving system
 demo/
   run_demo.py                       # PoC demo: same call path, both OEMs
   make_pipeline_video.py            # records demo/run_demo.py's real output as a video
@@ -243,7 +316,8 @@ tests/
                                      # changing platform-facing calling code
   test_webapp_api.py                # tests for the Flask API layer (now incl.
                                      # health, fault controls, live SSE mission,
-                                     # mission log, fleet stats, stats-query)
+                                     # mission log, fleet stats, stats-query,
+                                     # delivery endpoints)
   test_retry_policy.py              # module-aware retry policy table
   test_fault_injection.py           # deterministic + probabilistic FaultProfile
   test_step_runner.py               # single-step execution + retry
@@ -252,6 +326,10 @@ tests/
   test_stats_query.py               # template + Anthropic LLM query engines
   test_multistep_missions.py        # end-to-end multi-step mission execution
   test_audit_log_indexing.py        # per-mission/per-robot audit log indices
+  test_artifact_capture.py          # local no-network per-step simulated sensor capture
+  test_customer_registry.py         # robot/capability -> subscribed-customer matching
+  test_customer_server.py           # mock_customer/customer_server.py, real local HTTP calls
+  test_data_delivery.py             # two-phase upload+push delivery, retries, failure modes
 ```
 
 ## How I used AI
@@ -346,3 +424,50 @@ step's retry loop from partial state without a fresh `execute` call) was
 also independently verified twice, once when it was introduced and again
 when `MissionExecutor.continue_mission` was built on top of it, rather
 than assumed correct because it worked once.
+
+For this round (post-mission data capture, upload, and customer
+delivery): I asked for mission data to actually get downloaded,
+uploaded, and delivered to customers after a mission completes, plus
+honest documentation of the design decisions behind it. Before any code
+was written, this went through the brainstorming skill's full Q&A cycle —
+capture scope (which steps produce artifacts, and whether capture itself
+touches the network), delivery mechanism (zip package vs. something
+else), upload direction and timing (per-step vs. one batch at mission
+end, and whose retry policy governs it), and webhook target. On that
+last point I explicitly redirected away from the first proposal, which
+was to wire in real AWS (S3 + API Gateway/EventBridge) — I chose the
+cheaper, safer path of a real *local* mock-customer server with an
+explicit, documented production mapping instead, consistent with how the
+rest of this repo treats "real but local" over "mocked" or "actually
+cloud-dependent." One refinement got made while writing the spec, not
+separately asked for: splitting "upload" into two independently-retried
+network legs (robot→platform reusing the mission's own `FaultProfile`,
+then platform→customer reusing the same retry policy against a real HTTP
+call) instead of one undifferentiated upload step — worth flagging as a
+refinement made in the course of writing the design, not something I
+requested directly.
+
+Execution was carried out the same subagent-driven way as the prior
+expansion: implementer subagents per task, independent reviewers with
+only the diff and the brief, no shared reasoning between the two. A few
+things from this round are worth citing specifically rather than glossing
+over: twice during execution a subagent crashed mid-response from an API
+connection error — once a fix-dispatch attempt that crashed before doing
+any work or committing, and once (on a later task) an implementer that
+crashed after it had already committed its work but before it got to
+write a report. Both times the real state was established by checking
+`git log`/`git status` directly rather than trusting or waiting on the
+agent's self-report, and work continued cleanly from there. Because that
+second crash left no implementer report to review against, the reviewer
+on that task didn't skip verification — it independently ran the demo
+script itself end to end to confirm the actual output: a real HTTP round
+trip to the mock-customer server, and correct scoping of the
+offline-mission scenario (a mission-level failure, not a fabricated
+delivery failure). Two Important review findings also got fixed via
+follow-up dispatches rather than waved through: a missing
+`backoff_for_attempt()` call in `DeliveryService`'s retry loops (retries
+were firing with zero delay, against the plan's explicit requirement to
+reuse the same backoff mechanism), and an untested code branch in
+`OrchestrationService`'s `_executor_for` (the custom-poll-config path
+that threads a `delivery_service` through a throwaway executor) — both
+resolved and re-verified rather than left as known gaps.
