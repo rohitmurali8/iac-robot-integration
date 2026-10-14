@@ -127,10 +127,11 @@ customers who asked for it — end to end, no manual step in between.
   nothing new to reason about: a flaky or offline robot behaves the same
   way for its data as it does for its mission steps. A robot that goes
   offline right as its mission completes can still COMPLETE the mission
-  while its data never makes it off the robot
-  (`DeliveryStatus.UPLOAD_FAILED`) — see `demo/run_demo.py`'s delivery
-  demo section (`run_delivery_demo`) for both the nominal and
-  offline-at-completion stories played out against the real code.
+  while its data never makes it off the robot (`DeliveryStatus.UPLOAD_FAILED`,
+  exercised directly in `tests/test_data_delivery.py`); `demo/run_demo.py`'s
+  delivery demo section shows the nominal delivery path plus the related
+  (but distinct) case of a robot offline for an entire mission, which fails
+  the mission outright before delivery is ever attempted.
 - **Packaging and customer delivery.** On a successful upload,
   `DeliveryPackager` builds a `mission-report-<id>.zip` (manifest +
   artifact files), and `CustomerRegistry`
