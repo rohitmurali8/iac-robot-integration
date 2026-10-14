@@ -401,7 +401,12 @@ document.getElementById("ask-btn").addEventListener("click", async () => {
     answerBox.textContent = `Error: ${data.error}`;
     return;
   }
-  answerBox.innerHTML = `${data.answer} <span class="engine-badge">${data.engine}</span>`;
+  answerBox.textContent = "";
+  answerBox.appendChild(document.createTextNode(data.answer + " "));
+  const badge = document.createElement("span");
+  badge.className = "engine-badge";
+  badge.textContent = data.engine;
+  answerBox.appendChild(badge);
 });
 
 async function runMission(capability) {

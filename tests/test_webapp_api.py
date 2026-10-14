@@ -171,6 +171,7 @@ def test_fleet_stats_and_robot_stats_endpoints(client):
 
     assert fleet_stats["total_missions"] > 0
     assert robot_stats["missions_run"] > 0
+    assert robot_stats["total_steps_executed"] > 0
 
 
 def test_stats_query_endpoint_returns_template_answer_by_default(client, monkeypatch):

@@ -176,9 +176,15 @@ class AnthropicStatsQueryEngine:
         return "\n".join(lines)
 
     def _call_api(self, prompt: str) -> str:
+        # max_tokens is sized well above the ~512 tokens the answer itself
+        # needs: on Claude Sonnet 5 (the default model string here),
+        # omitting `thinking` runs adaptive thinking by default, and that
+        # thinking spend is drawn from this same max_tokens budget. A
+        # tight budget risks truncating -- or fully starving -- the
+        # answer text. 1500 leaves comfortable headroom for both.
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=512,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text

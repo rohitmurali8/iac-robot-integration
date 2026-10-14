@@ -133,6 +133,7 @@ def _robot_stats_dict(rs) -> dict:
         "success_rate": rs.success_rate,
         "total_retries": rs.total_retries,
         "retries_by_module": {k.value: v for k, v in rs.retries_by_module.items()},
+        "total_steps_executed": rs.total_steps_executed,
     }
 
 
