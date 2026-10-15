@@ -6,3 +6,10 @@ Werkzeug>=3.1
 pytest>=9.1
 matplotlib>=3.11
 pillow>=12.0
+
+# Kubernetes client -- only actually used when FLEET_SOURCE=k8s
+# (k8s/fleet_discovery.py, imported lazily inside webapp/app.py's k8s
+# branch) or by k8s/fleet_scaler.py. Included here, not in
+# requirements-optional.txt, because this SAME image is what's deployed
+# as the fleet-manager/fleet-scaler pods in k8s/ -- see k8s/README.md.
+kubernetes>=31.0

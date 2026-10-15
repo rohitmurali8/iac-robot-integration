@@ -1,0 +1,68 @@
+# Two separate ServiceAccounts, least-privilege: fleet-manager only ever
+# needs to LIST pods (to discover workers); fleet-scaler additionally
+# needs to read and patch Deployment scale (to actually act on its
+# scaling decisions). Neither can do anything outside the iac-fleet
+# namespace (Role, not ClusterRole).
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-manager
+  namespace: iac-fleet
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-scaler
+  namespace: iac-fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-manager-pod-reader
+  namespace: iac-fleet
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-manager-pod-reader
+  namespace: iac-fleet
+subjects:
+  - kind: ServiceAccount
+    name: fleet-manager
+    namespace: iac-fleet
+roleRef:
+  kind: Role
+  name: fleet-manager-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-scaler-controller
+  namespace: iac-fleet
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-scaler-controller
+  namespace: iac-fleet
+subjects:
+  - kind: ServiceAccount
+    name: fleet-scaler
+    namespace: iac-fleet
+roleRef:
+  kind: Role
+  name: fleet-scaler-controller
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,63 @@
+# The autonomous scaling controller (k8s/fleet_scaler.py). Polls
+# fleet-manager's own real API for per-pool mission throughput and
+# patches each pool Deployment's replica count accordingly -- no
+# HorizontalPodAutoscaler/metrics-server involved, see fleet_scaler.py's
+# own docstring for why.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-scaler
+  namespace: iac-fleet
+  labels:
+    app: fleet-scaler
+spec:
+  replicas: 1
+  # Recreate, not the default RollingUpdate -- this is a singleton
+  # controller with no leader election. RollingUpdate's default overlap
+  # window (new pod starts before the old one fully terminates) means
+  # two fleet_scaler.py instances briefly poll and patch the SAME
+  # Deployments concurrently on every redeploy, each computing "scale by
+  # 1" from its own independent read with no coordination between them --
+  # observed directly: this produced real, uncommanded replica-count
+  # drift (mockrobot-pool climbed to 8 replicas under zero load) during
+  # a rollout restart before this was set. Recreate kills the old pod
+  # first, guaranteeing at most one fleet-scaler is ever running.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: fleet-scaler
+  template:
+    metadata:
+      labels:
+        app: fleet-scaler
+    spec:
+      serviceAccountName: fleet-scaler
+      containers:
+        - name: fleet-scaler
+          image: iac-robot-integration:local
+          imagePullPolicy: Never
+          command: ["python", "k8s/fleet_scaler.py"]
+          env:
+            # Without this, Python block-buffers stdout when it isn't a
+            # TTY (always true under Kubernetes), so this controller's
+            # print()-based decision log never reaches `kubectl logs`
+            # until the buffer fills or the process exits -- observed
+            # directly: logs stayed empty through several real poll
+            # cycles without this.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: ORCHESTRATOR_URL
+              value: "http://fleet-manager:5055"
+            - name: POOL_NAMESPACE
+              value: iac-fleet
+            - name: SCALER_POLL_INTERVAL_S
+              value: "10"
+            - name: SCALE_UP_MISSIONS_PER_POD
+              value: "2"
+            - name: SCALE_DOWN_MISSIONS_PER_POD
+              value: "0.5"
+            - name: MIN_REPLICAS
+              value: "1"
+            - name: MAX_REPLICAS
+              value: "5"

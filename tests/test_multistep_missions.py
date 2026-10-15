@@ -282,7 +282,11 @@ def test_orchestration_service_delivers_to_subscribed_customer_end_to_end(tmp_pa
     customer_registry = CustomerRegistry()
     customer_registry.register(Customer(
         customer_id="acme",
-        webhook_url="http://example.invalid/webhook",  # unreachable on purpose -- this test only checks UPLOAD/packaging path shape
+        # Port 1 on loopback: a real, local, immediately-refused
+        # connection (no DNS lookup, unlike a nonexistent external
+        # hostname) -- this test only checks the UPLOAD/packaging path
+        # shape, not whether the push itself succeeds.
+        webhook_url="http://127.0.0.1:1/webhook",
         subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
         site_robot_ids=frozenset({"spot-01"}),
     ))
@@ -309,7 +313,7 @@ def test_orchestration_service_customer_registry_property_is_shared():
     service = OrchestrationService(registry, AuditLog())
 
     service.customer_registry.register(Customer(
-        customer_id="acme", webhook_url="http://example.invalid/webhook",
+        customer_id="acme", webhook_url="http://127.0.0.1:1/webhook",
         subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
         site_robot_ids=frozenset({"spot-01"}),
     ))
@@ -338,7 +342,7 @@ def test_wait_for_completion_with_custom_poll_config_still_wires_delivery_servic
     customer_registry = CustomerRegistry()
     customer_registry.register(Customer(
         customer_id="acme",
-        webhook_url="http://example.invalid/webhook",
+        webhook_url="http://127.0.0.1:1/webhook",
         subscribed_capabilities=frozenset({CapabilityType.INSPECT_THERMAL}),
         site_robot_ids=frozenset({"spot-01"}),
     ))

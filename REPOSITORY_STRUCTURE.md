@@ -20,7 +20,7 @@ Dockerfile                      runs webapp/app.py (or tests/demo) in a containe
 cpp_nodes/Dockerfile            FROM ros:humble-ros-base -- real colcon build of cpp_nodes/, separate image
 docker-compose.yml              `docker compose up --build` (webapp) / `--profile ros2 up cpp_nodes` (ROS2 build)
 .dockerignore                   keeps .git/.venv/__pycache__ out of the build context
-requirements.txt                core deps the Docker image installs (Flask, pytest, matplotlib, pillow)
+requirements.txt                core deps the Docker image installs (Flask, pytest, matplotlib, pillow, kubernetes)
 requirements-optional.txt       playwright (GUI recording) + anthropic (real LLM queries) -- NOT in the image
 pyproject.toml                  pytest config (pythonpath=".", testpaths=["tests"])
 .gitignore                      ignores .venv/, __pycache__/, demo/output/video/frames/, deliveries/
@@ -30,8 +30,10 @@ integration_layer/              the platform: capability model, mission schema, 
 mock_robot/                     the two real (simulated) OEM robot adapters
 mock_customer/                  a real second Flask process simulating a customer's receiving system
 webapp/                         the live GUI (Flask + vanilla JS) and its recording script
+fleet_worker/                   runs inside a Kubernetes pod: one adapter, exposed over HTTP
+k8s/                            fleet-scaling manifests + discovery/scaling controllers, see below
 demo/                           CLI proof-of-concept script + pipeline video renderer
-tests/                          the full automated test suite (206 tests)
+tests/                          the full automated test suite (223 tests)
 docs/                           presentation slide deck, superpowers plans/specs/skill-process artifacts
 ```
 
@@ -69,6 +71,8 @@ exercised by both OEM adapters identically (that symmetry is what
 | `customer_registry.py` | `Customer`, `CustomerRegistry` — robot+capability subscription matching for data delivery | `data_delivery.py`, `orchestration_service.py`, `webapp/app.py`, `demo/run_demo.py` |
 | `data_delivery.py` | `DeliveryPackager`, `DeliveryService`, `DeliveryStatus`, `DeliveryRecord` — two-phase upload+push, both retried via `retry_policy.py` | `mission_executor.py` only |
 | `stats_query.py` | `TemplateStatsQueryEngine`, `AnthropicStatsQueryEngine`, `get_query_engine()` — natural-language fleet querying, with timeout/retry/fallback/caching on the LLM path | `webapp/app.py` only |
+| `wire.py` | JSON (de)serialization for the one real wire format in this repo — `MissionStep`/`MissionStepStatus`/`CapabilityDescriptor`/`FaultProfile` crossing the `RemoteRobotAdapter` ↔ `fleet_worker` HTTP boundary | `remote_adapter.py`, `fleet_worker/app.py` |
+| `remote_adapter.py` | `RemoteRobotAdapter` — drives a Kubernetes-deployed worker pod over HTTP, same `RobotAdapter` interface every in-process adapter implements | `k8s/fleet_discovery.py`, `webapp/app.py` (k8s mode only) |
 
 ## `integration_layer/api/`
 
@@ -141,6 +145,19 @@ the same way `safety_monitor_node`'s equivalent field already correctly did.
 
 The GUI-recording script that produced `webapp/output/`'s screenshots/video isn't published in this repo (not needed to run or evaluate the platform) — the recorded evidence it produced is still committed under `webapp/output/`.
 
+## `fleet_worker/` and `k8s/` — Kubernetes fleet scaling
+
+| File | Role | Imported by |
+|---|---|---|
+| `fleet_worker/app.py` | Runs inside one Kubernetes pod: wraps exactly one `MockRobotAdapter`/`CloudFleetAdapter` instance, exposes the `RobotAdapter` interface (plus the fault-profile/power-pct proxy surface) over HTTP. SAME Docker image as `webapp/app.py`, different container command | nothing in-process — launched as a subprocess/pod, never `import`ed |
+| `integration_layer/core/wire.py` | JSON (de)serialization for `MissionStep`/`MissionStepStatus`/`CapabilityDescriptor`/`FaultProfile` — the one real wire format in this repo, used only at the `RemoteRobotAdapter` ↔ `fleet_worker` HTTP boundary | `remote_adapter.py`, `fleet_worker/app.py` |
+| `integration_layer/core/remote_adapter.py` | `RemoteRobotAdapter` — drives a worker pod over HTTP, implementing the same interface every in-process adapter does. Network failures funnel into the same `FailureReason.CONNECTIVITY_LOST`/retry path a real robot connectivity loss already does | `k8s/fleet_discovery.py`, `webapp/app.py` (only when `FLEET_SOURCE=k8s`) |
+| `k8s/fleet_discovery.py` | Background-thread loop (`run_forever`) keeping an `AdapterRegistry` in sync with whatever worker pods currently exist in a namespace, via the Kubernetes Pods API. `kubernetes` client imported lazily, same discipline as `anthropic` in `stats_query.py` | `webapp/app.py`, only when `FLEET_SOURCE=k8s` |
+| `k8s/fleet_scaler.py` | The autonomous controller: polls fleet-manager's real `/api/fleet`/`/api/stats/robots/<id>`, computes per-pool mission throughput, scales that pool's Deployment replica count. Deliberately plain Python, not a `HorizontalPodAutoscaler` | run standalone, as its own pod (`k8s/fleet-scaler.yaml`) |
+| `k8s/*.yaml` | Manifests: `namespace.yaml`, `rbac.yaml` (least-privilege ServiceAccounts for discovery vs. scaling), `mockrobot-pool.yaml`/`cloudfleet-pool.yaml` (the two worker pools), `fleet-manager.yaml` (`webapp/app.py` with `FLEET_SOURCE=k8s`), `fleet-scaler.yaml` | applied via `kubectl apply -f`, see `k8s/README.md` |
+
+Verified against a real `kind` cluster — not just written and assumed correct. See the top-level README's "Fleet scaling on Kubernetes" section and `k8s/README.md` for what was actually run and the two real bugs that run caught and fixed.
+
 ## `demo/`
 
 | File | Role |
@@ -167,6 +184,8 @@ The GUI-recording script that produced `webapp/output/`'s screenshots/video isn'
 | `test_data_delivery.py` | Zip packaging, upload-phase retry via `FaultProfile`, push-phase retry via stub and via the real customer server | `data_delivery.py` |
 | `test_stats_query.py` | Template engine; Anthropic engine's timeout/retry/fallback/caching, all via a fake client, zero real network calls | `stats_query.py` |
 | `test_webapp_api.py` | Flask route wiring (deliberately thin — the logic lives below it) | `webapp/app.py` |
+| `test_wire.py` | Round-trip (de)serialization correctness | `wire.py` |
+| `test_remote_adapter.py` | Real `fleet_worker/app.py` subprocess, real HTTP — capabilities, step execution, fault-profile proxy, unreachable-pod fallback | `remote_adapter.py`, `fleet_worker/app.py` |
 
 ## `docs/`
 

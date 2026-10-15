@@ -1,0 +1,62 @@
+# The second OEM-type pool -- CloudFleetAdapter workers, independently
+# scalable from mockrobot-pool. Proves pool scaling isn't special-cased
+# to one adapter type: fleet_scaler.py treats both pools identically.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudfleet-pool
+  namespace: iac-fleet
+  labels:
+    app: cloudfleet-pool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudfleet-pool
+  template:
+    metadata:
+      labels:
+        app: cloudfleet-pool
+        iac/role: fleet-worker
+    spec:
+      containers:
+        - name: worker
+          image: iac-robot-integration:local
+          imagePullPolicy: Never
+          command: ["python", "fleet_worker/app.py"]
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: ROBOT_TYPE
+              value: cloudfleet
+            - name: CLOUD_SENSORS
+              value: rgb_cam,voc_sensor
+            - name: WORKER_PORT
+              value: "6000"
+            - name: ROBOT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 6000
+          readinessProbe:
+            httpGet: { path: /health, port: 6000 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 6000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudfleet-pool
+  namespace: iac-fleet
+spec:
+  clusterIP: None
+  selector:
+    app: cloudfleet-pool
+  ports:
+    - port: 6000
+      targetPort: 6000

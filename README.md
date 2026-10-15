@@ -116,6 +116,33 @@ node topology.
 anthropic for real LLM-powered fleet queries) is **not** installed by
 default — see that file for why.
 
+### Fleet scaling on Kubernetes
+
+Each robot in a real deployment runs this repo's Docker image at the edge.
+`k8s/` models that directly: every robot becomes a pod (`fleet_worker/app.py`
+wrapping one adapter instance, driven over HTTP by a new
+`RemoteRobotAdapter`), and an autonomous controller (`k8s/fleet_scaler.py`)
+scales same-OEM-type pools of those pods up and down based on real mission
+throughput — not a human running `kubectl scale`, and not a
+metrics-server-backed HorizontalPodAutoscaler, but plain Python reading
+the platform's own real `/api/fleet`/`/api/stats/robots/<id>` data, the
+same data the GUI's Fleet Analytics panel already shows.
+
+Verified directly against a real `kind` cluster, not just written and
+assumed to work: built the image, loaded it into the cluster, applied the
+manifests, confirmed pod discovery via `ros2`-style `kubectl`/K8s API
+calls, drove real missions through `RemoteRobotAdapter` across pod
+boundaries, and watched the controller autonomously scale a pool from 1
+to 2 pods after a burst of real mission load (`cloudfleet-pool: load=11.00
+missions/pod -- scaling 1 -> 2`), then back down under idle load. That
+run caught and fixed two real bugs: a missing `PYTHONUNBUFFERED=1` (the
+controller's own logs were silently buffered and never reached `kubectl
+logs`), and a scaling-decision bug where the controller computed its new
+replica target from a discovery-derived pod count instead of the
+Deployment's actual `spec.replicas`, causing real uncommanded replica
+drift under a concurrent-rollout edge case — full details in
+`k8s/README.md`, which also has the exact run-it-yourself steps.
+
 ## Multi-step missions, resilience, and fleet analytics
 
 Beyond the original single-step PoC above, the orchestration core now
@@ -234,7 +261,7 @@ crosses that boundary.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install pytest matplotlib pillow   # pillow only needed for the video
-.venv/bin/python -m pytest tests/ -v             # 195/195 — conformance + platform-agnosticism + retry/fault-injection/analytics/LLM-query/data-delivery
+.venv/bin/python -m pytest tests/ -v             # 223/223 — conformance + platform-agnosticism + retry/fault-injection/analytics/LLM-query/data-delivery/k8s-fleet
 .venv/bin/python demo/run_demo.py                # runs the demo, writes demo/output/
 .venv/bin/python demo/make_pipeline_video.py      # records a video of the pipeline running
 ```
@@ -538,3 +565,26 @@ reuse the same backoff mechanism), and an untested code branch in
 `OrchestrationService`'s `_executor_for` (the custom-poll-config path
 that threads a `delivery_service` through a throwaway executor) — both
 resolved and re-verified rather than left as known gaps.
+
+The Kubernetes fleet-scaling work (`k8s/`, `fleet_worker/`) started from
+a request to add "Kubernetes scaling across the robot fleet," which I
+pushed back on before writing anything: robots aren't fungible replicas
+you autoscale like a web tier, so I proposed the actual coherent version
+— per-OEM-type worker pools are fungible, individual named robots aren't
+— and clarified what "agentic" scaling should concretely mean (a
+real-fleet-stats-driven controller, not an LLM making the call, not a
+plain HorizontalPodAutoscaler) before building anything. The whole thing
+was then verified against a real local `kind` cluster, not just written
+and assumed correct, and that run caught two genuine bugs no amount of
+code review would have: `webapp/app.py`'s fleet snapshot called a
+concrete-adapter method (`get_fault_profile()`) that `RemoteRobotAdapter`
+simply didn't have yet, 500ing `/api/fleet` the instant it ran against a
+real pod; and `fleet_scaler.py`'s scaling decision used the wrong
+baseline (a discovery-derived pod count instead of the Deployment's own
+`spec.replicas`), which looked fine in every unit-level read of the code
+but produced real, observable, uncommanded replica drift (climbing to 8
+replicas under zero load) during a concurrent-rollout edge case that only
+showed up once two controller instances were actually both running. Both
+were fixed and re-verified live against the cluster — including watching
+the controller correctly scale a pool from 1 to 2 pods in response to a
+real burst of mission traffic — before anything was called done.

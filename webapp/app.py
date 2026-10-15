@@ -79,7 +79,26 @@ def _seed_fleet() -> None:
     registry.register(CloudFleetAdapter(robot_id="fleetx-01", fleet_manifest={"sensors": ["voc_sensor"]}))
 
 
-_seed_fleet()
+# FLEET_SOURCE=k8s: instead of two fixed local-process adapters, the
+# fleet is whatever robot-worker pods a Kubernetes namespace actually
+# has running right now -- discovered, registered, and kept in sync by
+# a background thread (k8s/fleet_discovery.py) rather than a one-shot
+# seed call. See k8s/README.md for how to run this against a real
+# cluster. Local/default runs (this env var unset) are completely
+# unaffected -- same two static adapters as always.
+_FLEET_SOURCE = os.environ.get("FLEET_SOURCE", "local")
+
+if _FLEET_SOURCE == "k8s":
+    from k8s.fleet_discovery import run_forever as _run_k8s_discovery
+
+    _k8s_namespace = os.environ.get("POOL_NAMESPACE", "default")
+    _k8s_interval_s = float(os.environ.get("FLEET_DISCOVERY_INTERVAL_S", "5"))
+    _k8s_discovery_thread = threading.Thread(
+        target=_run_k8s_discovery, args=(registry, _k8s_namespace, _k8s_interval_s), daemon=True
+    )
+    _k8s_discovery_thread.start()
+else:
+    _seed_fleet()
 
 
 def _seed_customers() -> None:
@@ -345,7 +364,15 @@ def api_set_robot_conditions(robot_id: str):
             return jsonify({"error": f"unknown capability {payload['failed_sensor']!r}"}), 400
         adapter.set_sensor_failed(capability, bool(payload.get("failed", True)))
     if "extra_latency_polls" in payload:
-        adapter.get_fault_profile().extra_latency_polls = int(payload["extra_latency_polls"])
+        # Explicit read-modify-write, not a bare attribute mutation on
+        # the returned object -- a local adapter's get_fault_profile()
+        # returns the live object (mutation alone would already stick),
+        # but RemoteRobotAdapter's returns a fresh snapshot fetched over
+        # HTTP, so the change has to be sent back explicitly via
+        # set_fault_profile() to actually take effect against the pod.
+        fault_profile = adapter.get_fault_profile()
+        fault_profile.extra_latency_polls = int(payload["extra_latency_polls"])
+        adapter.set_fault_profile(fault_profile)
     if "random_failure_rate" in payload:
         rate_spec = payload["random_failure_rate"]
         try:
@@ -510,7 +537,12 @@ def api_reset():
     global service
     registry.clear()
     audit_log.clear()
-    _seed_fleet()
+    # In k8s mode the background discovery thread (already running,
+    # polling every FLEET_DISCOVERY_INTERVAL_S) repopulates the registry
+    # from whatever pods currently exist on its own -- calling the
+    # static local-process seed here would be wrong in that mode.
+    if _FLEET_SOURCE != "k8s":
+        _seed_fleet()
     customer_registry.clear()
     _seed_customers()
     service = OrchestrationService(registry, audit_log, customer_registry=customer_registry)

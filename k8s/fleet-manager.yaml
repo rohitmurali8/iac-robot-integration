@@ -1,0 +1,57 @@
+# Runs the SAME webapp/app.py as the local/Docker GUI -- FLEET_SOURCE=k8s
+# is the only difference, which swaps the two hard-coded local adapters
+# for live discovery of whatever worker pods currently exist in this
+# namespace (k8s/fleet_discovery.py). Every existing GUI feature
+# (missions, live SSE, fault controls, deliveries, analytics, ask-the-fleet)
+# works unmodified against the discovered fleet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-manager
+  namespace: iac-fleet
+  labels:
+    app: fleet-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-manager
+  template:
+    metadata:
+      labels:
+        app: fleet-manager
+    spec:
+      serviceAccountName: fleet-manager
+      containers:
+        - name: fleet-manager
+          image: iac-robot-integration:local
+          imagePullPolicy: Never
+          command: ["python", "webapp/app.py"]
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: FLEET_SOURCE
+              value: k8s
+            - name: POOL_NAMESPACE
+              value: iac-fleet
+            - name: WEBAPP_HOST
+              value: 0.0.0.0
+          ports:
+            - containerPort: 5055
+          readinessProbe:
+            httpGet: { path: /, port: 5055 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-manager
+  namespace: iac-fleet
+spec:
+  selector:
+    app: fleet-manager
+  ports:
+    - port: 5055
+      targetPort: 5055
+  type: ClusterIP
