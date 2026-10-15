@@ -10,3 +10,15 @@ services:
       # requirements-optional.txt's anthropic package too (see README.md),
       # which the default image does not include.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+  # The Python platform above is the whole demonstrable system and is
+  # what `docker compose up` brings up by default. cpp_nodes/ is behind
+  # its own profile because `ros:humble-ros-base` is a multi-GB pull --
+  # opt in explicitly with `docker compose --profile ros2 up --build cpp_nodes`.
+  # This is a REAL colcon build against real rclcpp (not illustrative
+  # inside this container -- see cpp_nodes/README.md); it's just not
+  # wired to the Python platform above, which has no ROS2 dependency.
+  cpp_nodes:
+    profiles: ["ros2"]
+    build:
+      context: ./cpp_nodes

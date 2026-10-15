@@ -1,10 +1,10 @@
 # Optional extras -- NOT installed in the Docker image by default.
 #
-# playwright: only needed to re-record webapp/record_gui_demo.py's video/
-# screenshots yourself. Pulls down a headless Chromium binary (~300MB),
-# which is why it's not in the default image -- the recorded evidence is
-# already committed under webapp/output/, so the container doesn't need
-# to regenerate it to demonstrate the GUI.
+# playwright: only needed to re-record the GUI walkthrough yourself (the
+# recording script isn't published in this repo; the recorded evidence
+# it produced is already committed under webapp/output/). Pulls down a
+# headless Chromium binary (~300MB), which is why it's not in the
+# default image -- the container doesn't need it to demonstrate the GUI.
 playwright>=1.63
 
 # anthropic: only needed for AnthropicStatsQueryEngine's real LLM calls

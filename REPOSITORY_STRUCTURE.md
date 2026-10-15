@@ -17,14 +17,15 @@ DESIGN.md                      design doc (the spec this PoC implements)
 README.md                      how to run everything, what's real vs. illustrative
 REPOSITORY_STRUCTURE.md         this file
 Dockerfile                      runs webapp/app.py (or tests/demo) in a container -- real Python platform only
-docker-compose.yml              one-command `docker compose up --build`
+cpp_nodes/Dockerfile            FROM ros:humble-ros-base -- real colcon build of cpp_nodes/, separate image
+docker-compose.yml              `docker compose up --build` (webapp) / `--profile ros2 up cpp_nodes` (ROS2 build)
 .dockerignore                   keeps .git/.venv/__pycache__ out of the build context
 requirements.txt                core deps the Docker image installs (Flask, pytest, matplotlib, pillow)
 requirements-optional.txt       playwright (GUI recording) + anthropic (real LLM queries) -- NOT in the image
 pyproject.toml                  pytest config (pythonpath=".", testpaths=["tests"])
 .gitignore                      ignores .venv/, __pycache__/, demo/output/video/frames/, deliveries/
 schemas/mission.proto           canonical wire contract (hand-mirrored in Python, see below)
-cpp_nodes/                      illustrative only -- not built or run (not in the Docker image either), see below
+cpp_nodes/                      real ament_cmake ROS2 package, builds+runs via its own Dockerfile, see below
 integration_layer/              the platform: capability model, mission schema, orchestration, OEM-agnostic core
 mock_robot/                     the two real (simulated) OEM robot adapters
 mock_customer/                  a real second Flask process simulating a customer's receiving system
@@ -44,7 +45,6 @@ These are the files you actually run; everything else is a library they import.
 | `.venv/bin/python demo/run_demo.py` | CLI proof of concept: 3 missions across both OEMs, 4-posture resilience demo, delivery demo. Writes `demo/output/` |
 | `.venv/bin/python demo/make_pipeline_video.py` | Renders `demo/run_demo.py`'s captured stdout as a scrolling terminal animation video/gif |
 | `.venv/bin/python webapp/app.py` | Starts the live GUI at `http://127.0.0.1:5055` |
-| `.venv/bin/python webapp/record_gui_demo.py` | Drives the real GUI in headless Chromium via Playwright, writes `webapp/output/` (screenshots + video) |
 | `.venv/bin/python docs/presentation/export_pdf.py` | Renders `docs/presentation/orchestration_walkthrough.html` to a 12-slide PDF |
 | `docker compose up --build` | Builds and runs `webapp/app.py` in a container, published at `http://127.0.0.1:5055` — see README.md's "Run it with Docker" |
 
@@ -76,19 +76,22 @@ exercised by both OEM adapters identically (that symmetry is what
 |---|---|---|
 | `orchestration_service.py` | `OrchestrationService` — the ONE class orchestration core/the GUI/the demo actually talk to. Thin facade composing `MissionExecutor` + `MissionAnalytics` + `CustomerRegistry`/`DeliveryService`. `assign_mission()`/`wait_for_completion()` are pinned, byte-for-byte stable since before any resilience/delivery work began | `demo/run_demo.py`, `webapp/app.py`, `tests/test_platform_agnosticism.py`, `tests/test_multistep_missions.py` |
 
-## `integration_layer/adapters/ros2_generic/` and `cpp_nodes/` — illustrative only
+## `integration_layer/adapters/ros2_generic/` (illustrative) and `cpp_nodes/` (real, in Docker)
 
 `adapter.py` here implements the same `RobotAdapter` interface as the two real
-adapters, written against the real `rclpy` API surface for shape-correctness, but
-there is no ROS2 install in this environment — it has never been compiled or run.
-`cpp_nodes/` is the same story in C++, structured as a real standard `ament_cmake`
-package (not a flat file dump):
+adapters, written against the real `rclpy` API surface for shape-correctness,
+but nothing in this repo compiles or runs it, in Docker or otherwise.
+
+`cpp_nodes/` is a different story: a real standard `ament_cmake` package (not
+a flat file dump) that genuinely builds and runs, via `cpp_nodes/Dockerfile`
+(`FROM ros:humble-ros-base`) and `docker compose --profile ros2 up cpp_nodes`:
 
 ```
 cpp_nodes/
   package.xml                          # ament_cmake, declares rclcpp/sensor_msgs/
                                         # geometry_msgs/std_msgs/std_srvs/diagnostic_msgs
   CMakeLists.txt                       # 5 executables, ament_lint_auto test deps
+  Dockerfile                           # FROM ros:humble-ros-base, real colcon build
   README.md                            # package-local readme: node topology diagram
   src/
     safety_monitor_node.cpp            # independent e-stop watchdog
@@ -101,15 +104,19 @@ cpp_nodes/
                                         # not hard-coded constants)
 ```
 
-Neither this directory nor `ros2_generic/adapter.py` is imported by anything that
-actually runs in this repo; they exist to prove the interface/package shape
-generalizes to a real ROS2 deployment, not to claim that deployment was tested
-here. Each node still declares its tunables as proper ROS2 parameters (loaded from
-`config/params.yaml`) rather than hard-coded constants, and the five nodes
-coordinate purely through topics/services — e.g. `battery_monitor_node` calling
-`safety_monitor_node`'s `/estop` service directly, with neither node aware of the
-other's internals — the same loose-coupling pattern enforced between the two real
-Python OEM adapters.
+Not imported by anything in the Python platform (no ROS2 dependency anywhere
+in `integration_layer/`/`webapp/`/`demo/`) — it's a standalone ROS2 package,
+verified standalone: built with `colcon build --packages-select iac_cpp_nodes`
+against real `rclcpp`, launched with `ros2 launch iac_cpp_nodes bringup.launch.py`,
+and checked with `ros2 topic list`/`ros2 topic echo`/`ros2 service call` —
+`/diagnostics` genuinely aggregates live `/battery_state` + `/safety/estop_active`
+data, `battery_monitor_node` genuinely calls `safety_monitor_node`'s `/estop`
+service (the same loose-coupling pattern enforced between the two real Python
+OEM adapters), and `/payload/capture_gas` correctly rejects since
+`gas_sensor_enabled` defaults to false. One real bug was caught this way:
+`command_bridge_node` crashed on startup from an uninitialized `rclcpp::Time`
+field (mismatched clock source), fixed by initializing it in the constructor
+the same way `safety_monitor_node`'s equivalent field already correctly did.
 
 ## `mock_robot/` — the two real (simulated) OEM adapters
 
@@ -131,7 +138,8 @@ Python OEM adapters.
 |---|---|
 | `app.py` | Flask wrapper around the real `OrchestrationService` — every GUI click goes through the exact same platform code as the CLI demo and tests. Seeds the fleet + customers, runs a background mock-customer server, exposes ~20 routes (missions, live SSE, fault controls, mission log, deliveries, stats, LLM query, admin OEM-swap) |
 | `templates/index.html` | The dashboard itself: fleet health panel, fault-injection controls, live multi-step mission execution (SSE), audit trail, mission log, deliveries panel, fleet analytics, "ask about the fleet," and the OEM-provider-swap demo control |
-| `record_gui_demo.py` | Drives `app.py` in real headless Chromium via Playwright and records the session — not hand-picked screenshots, a scripted click-through of an actually running server |
+
+The GUI-recording script that produced `webapp/output/`'s screenshots/video isn't published in this repo (not needed to run or evaluate the platform) — the recorded evidence it produced is still committed under `webapp/output/`.
 
 ## `demo/`
 
@@ -179,5 +187,5 @@ scaffold runs without a `protoc` toolchain, per `DESIGN.md`.
 | Path | Produced by |
 |---|---|
 | `demo/output/demo_run.txt`, `mission_timeline.png`, `video/`, `deliveries/*.zip` | `demo/run_demo.py` (+ `make_pipeline_video.py` for `video/`) |
-| `webapp/output/screenshot_*.png`, `gui_demo.webm`/`.mp4` | `webapp/record_gui_demo.py` |
+| `webapp/output/screenshot_*.png`, `gui_demo.webm`/`.mp4` | GUI-recording script (not published, see `webapp/` section above) |
 | `deliveries/` (top-level, gitignored) | `webapp/app.py`'s runtime use of `OrchestrationService`'s default delivery output dir |

@@ -37,9 +37,9 @@ package's upload/webhook-push status and a download link, driven by the
 same real backend described below.
 
 **Recorded evidence it actually works**, captured by driving the real app
-in real headless Chromium via Playwright (`webapp/record_gui_demo.py`) —
-not hand-picked screenshots, a scripted click-through of an actually
-running server:
+in real headless Chromium via Playwright — not hand-picked screenshots, a
+scripted click-through of an actually running server. The recording script
+itself isn't published in this repo; the evidence it produced is:
 
 - `webapp/output/screenshot_initial.png` — fleet loaded, zero missions run
 - `webapp/output/screenshot_final.png` — after all three missions, audit trail populated
@@ -49,15 +49,6 @@ running server:
   QuickTime and most native macOS tools won't play `.webm` directly — the
   `.mp4` above is a straight ffmpeg transcode of this file, same content,
   not a re-recording.
-
-To reproduce the recording:
-
-```bash
-.venv/bin/pip install playwright
-.venv/bin/playwright install chromium
-brew install ffmpeg          # optional -- only needed for the .mp4 transcode
-.venv/bin/python webapp/record_gui_demo.py
-```
 
 ![GUI final state](webapp/output/screenshot_final.png)
 
@@ -83,15 +74,42 @@ image, ran a mission through it, swapped the OEM provider live, and confirmed
 a real webhook delivery against the containerized mock-customer server, all
 over the published port.
 
-The image deliberately does **not** attempt to build `cpp_nodes/` (that
-would require a full ROS2 toolchain) — see "What's real vs. illustrative"
-below; it packages the real Python platform only. To also run the test suite
-or the CLI demo inside the container without a rebuild:
+This default (`webapp`) image packages the real Python platform only. To
+also run the test suite or the CLI demo inside the container without a
+rebuild:
 
 ```bash
 docker run --rm iac-robot-integration python -m pytest tests/ -v
 docker run --rm iac-robot-integration python demo/run_demo.py
 ```
+
+### `cpp_nodes/` — a real ROS2 build, in its own container
+
+The Python image above does not include a ROS2 toolchain, and `cpp_nodes/`
+has nothing to do with it (no ROS2 dependency anywhere in the Python
+platform). `cpp_nodes/` gets its **own** image, built `FROM ros:humble-ros-base`,
+behind an opt-in Compose profile since that base image is a multi-GB pull:
+
+```bash
+docker compose --profile ros2 up --build cpp_nodes
+# or directly:
+docker build -t iac-cpp-nodes -f cpp_nodes/Dockerfile cpp_nodes
+docker run --rm iac-cpp-nodes
+```
+
+This is a **real `colcon build`** against real `rclcpp`/`sensor_msgs`/
+`geometry_msgs`/`std_msgs`/`std_srvs`/`diagnostic_msgs` — not illustrative
+inside this container. Verified directly: built the image, ran all 5 nodes
+via the package's own launch file, and confirmed with `ros2 topic
+list`/`ros2 topic echo`/`ros2 service call` that `/diagnostics` genuinely
+aggregates live `/battery_state` + `/safety/estop_active` data, and that
+`/payload/capture_visual` succeeds while `/payload/capture_gas` correctly
+rejects (gas sensor disabled by default) — real node-to-node coordination,
+not just "it compiled." One real bug was caught and fixed this way:
+`command_bridge_node` crashed on startup from an uninitialized
+`rclcpp::Time` field, a defect no amount of reading the code would have
+caught without actually running it. See `cpp_nodes/README.md` for the full
+node topology.
 
 `requirements.txt` has the core dependencies the image installs.
 `requirements-optional.txt` (playwright for re-recording the GUI video,
@@ -294,19 +312,26 @@ contract either way.
   live delivery flow. The AWS S3/API-Gateway production mapping described
   in "Post-mission data capture, upload, and customer delivery" above is
   illustrative only — not built, not called anywhere in this repo.
-- **Illustrative, not built or run**: `integration_layer/adapters/ros2_generic/adapter.py`
-  and everything in `cpp_nodes/`. Written against the real `rclpy`/`rclcpp`
-  API surface for correctness of shape — implementing the same
-  `RobotAdapter` interface the two PoC adapters implement — but there's no
-  ROS2 install in the environment this was built in, so they haven't been
-  compiled or run against real middleware. `DESIGN.md` section 4 treats
-  that verification (bench-testing an adapter against real hardware) as
-  real first-30-days engineering work, not something to claim as done here.
-  `cpp_nodes/` follows a standard `ament_cmake` package layout
-  (`src/`/`launch/`/`config/`, declared ROS2 parameters instead of
-  hard-coded constants, `ament_lint_auto` test dependencies) and now covers
-  five subsystems — safety, motion relay, power, inspection payload, and
-  diagnostics aggregation — see `cpp_nodes/README.md` for the node topology.
+- **`cpp_nodes/` is a real ROS2 build** — not run against real middleware
+  hardware (no robot to actually watch an e-stop fire on), but genuinely
+  compiled and run with `colcon build` against real `rclcpp` and real
+  message packages, via `docker compose --profile ros2 up cpp_nodes`
+  (`FROM ros:humble-ros-base`, see README "Run it with Docker" above and
+  `cpp_nodes/README.md` for the topology). Standard `ament_cmake` package
+  layout (`src/`/`launch/`/`config/`), declared ROS2 parameters instead of
+  hard-coded constants, 5 subsystems (safety, motion relay, power,
+  inspection payload, diagnostics aggregation) coordinating through real
+  topics/services, verified with `ros2 topic echo`/`ros2 service call`
+  against the running nodes, not just a successful compile. Bench-testing
+  against real robot hardware (as opposed to real ROS2 middleware in a
+  container) is still the first-30-days engineering work `DESIGN.md`
+  section 4 describes, not something claimed as done here.
+- **Illustrative, not built or run anywhere, including the container**:
+  `integration_layer/adapters/ros2_generic/adapter.py` only. Written
+  against the real `rclpy` API surface for correctness of shape —
+  implementing the same `RobotAdapter` interface the two PoC adapters
+  implement — but unlike `cpp_nodes/`, nothing in this repo compiles or
+  runs it, in Docker or otherwise.
 
 ## Layout
 
@@ -330,7 +355,7 @@ integration_layer/
     registry.py                     # fleet/capability registry
   adapters/ros2_generic/adapter.py  # ROS2 worked example (illustrative, see above)
   api/orchestration_service.py      # thin facade over MissionExecutor
-cpp_nodes/                            # ROS2 ament_cmake package, 5 nodes (illustrative, see cpp_nodes/README.md)
+cpp_nodes/                            # ROS2 ament_cmake package, 5 nodes (really builds+runs via Docker, see cpp_nodes/README.md)
 mock_robot/
   mock_robot_node.py                # OEM adapter #1: local/ROS2-style
   cloud_fleet_adapter.py            # OEM adapter #2: cloud/REST-style
@@ -347,8 +372,7 @@ demo/
 webapp/
   app.py                             # Flask wrapper around the real OrchestrationService
   templates/index.html               # the dashboard (vanilla HTML/CSS/JS, no build step)
-  record_gui_demo.py                 # drives the real GUI in headless Chromium, records it
-  output/
+  output/                            # recording script not published; recorded evidence is
     screenshot_initial.png           # real screenshot: fleet loaded, no missions run
     screenshot_final.png             # real screenshot: after 3 missions, audit populated
     gui_demo.webm                    # real recorded browser session (Playwright native format)

@@ -49,6 +49,14 @@ class CommandBridgeNode : public rclcpp::Node {
     relay_timer_ = create_wall_timer(
         std::chrono::duration_cast<std::chrono::milliseconds>(period),
         std::bind(&CommandBridgeNode::relay_command, this));
+
+    // Must be set here, not left to on_target()'s first call: a
+    // default-constructed rclcpp::Time carries a different clock source
+    // than now(), and relay_command()'s very first tick (before any
+    // target has ever arrived) would otherwise throw
+    // "can't subtract times with different time sources" instead of
+    // cleanly publishing zero.
+    last_target_time_ = now();
   }
 
  private:

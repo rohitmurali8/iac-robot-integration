@@ -19,18 +19,29 @@ cpp_nodes/
     params.yaml                      # per-node tunables, loaded by the launch file
 ```
 
-**Illustrative, not built or run in this repo** — there is no ROS2 toolchain in
-this environment. Every node is written against the real `rclcpp`/message-type
-API surface for correctness of shape (see each file's header comment for what's
-simulated vs. what a real deployment would replace), and would build cleanly
-in a real ROS2 (Humble or later) workspace:
+**Really built and run — in a dedicated Docker container, not bare-metal in
+this repo** (no ROS2 toolchain on the host this was developed on). From the
+repo root:
 
 ```bash
-# in a real ROS2 workspace, not this repo:
-colcon build --packages-select iac_cpp_nodes
-source install/setup.bash
-ros2 launch iac_cpp_nodes bringup.launch.py
+docker compose --profile ros2 up --build cpp_nodes
+# or directly:
+docker build -t iac-cpp-nodes -f Dockerfile .   # from inside cpp_nodes/
+docker run --rm iac-cpp-nodes
 ```
+
+This is a real `colcon build` against real `rclcpp`/`sensor_msgs`/
+`geometry_msgs`/`std_msgs`/`std_srvs`/`diagnostic_msgs` (`FROM
+ros:humble-ros-base`), not a shape-correctness-only claim: all 5 nodes build
+and run, `ros2 topic list` shows every expected topic, `/diagnostics`
+genuinely aggregates live `/battery_state` + `/safety/estop_active` data, and
+`/payload/capture_visual`/`/payload/capture_gas` respond correctly per the
+default payload config. Every node is still written with simulated sensor
+inputs/hardware reads (see each file's header comment for what's simulated
+vs. what a real deployment would replace) — there's no actual LIDAR, BMS, or
+camera behind any of this — but the ROS2 graph itself (nodes, topics,
+services, parameters, launch) is real, compiled, and exercised, not merely
+plausible-looking source.
 
 ## Node responsibilities and topology
 
