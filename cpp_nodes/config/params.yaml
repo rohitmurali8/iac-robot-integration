@@ -1,0 +1,32 @@
+# Shared parameter file for every node in this package, loaded by
+# launch/bringup.launch.py. Values here are the same defaults each node
+# falls back to if launched standalone without this file -- this file
+# exists so a real deployment has one place to retune per-robot without
+# touching source, not because the defaults themselves are wrong.
+
+safety_monitor_node:
+  ros__parameters:
+    min_proximity_m: 0.3
+    scan_stale_timeout_ms: 500
+
+command_bridge_node:
+  ros__parameters:
+    control_rate_hz: 50.0
+    target_stale_timeout_ms: 300
+
+battery_monitor_node:
+  ros__parameters:
+    publish_rate_hz: 1.0
+    low_battery_warn_pct: 20.0
+    critical_battery_pct: 5.0
+
+sensor_payload_node:
+  ros__parameters:
+    capture_latency_ms: 150
+    visual_camera_enabled: true
+    thermal_camera_enabled: true
+    gas_sensor_enabled: false
+
+diagnostics_aggregator_node:
+  ros__parameters:
+    aggregate_rate_hz: 2.0

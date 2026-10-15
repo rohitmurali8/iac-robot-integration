@@ -1,0 +1,12 @@
+services:
+  webapp:
+    build: .
+    ports:
+      - "5055:5055"
+    environment:
+      # Set a real key here (or in a .env file next to this one) to get
+      # full LLM-powered "Ask about the fleet" answers instead of the
+      # deterministic template engine -- requires rebuilding with
+      # requirements-optional.txt's anthropic package too (see README.md),
+      # which the default image does not include.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

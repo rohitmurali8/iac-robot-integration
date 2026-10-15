@@ -61,6 +61,43 @@ brew install ffmpeg          # optional -- only needed for the .mp4 transcode
 
 ![GUI final state](webapp/output/screenshot_final.png)
 
+## Run it with Docker (no local Python setup needed)
+
+```bash
+docker compose up --build
+# open http://127.0.0.1:5055
+```
+
+Or without compose:
+
+```bash
+docker build -t iac-robot-integration .
+docker run -p 5055:5055 iac-robot-integration
+```
+
+This runs the exact same `webapp/app.py` as the "Live GUI" section above —
+real `OrchestrationService`, real fault injection, real delivery pipeline
+(the in-process mock-customer webhook server runs inside the container too) —
+reachable from your host machine's browser. Verified directly: built the
+image, ran a mission through it, swapped the OEM provider live, and confirmed
+a real webhook delivery against the containerized mock-customer server, all
+over the published port.
+
+The image deliberately does **not** attempt to build `cpp_nodes/` (that
+would require a full ROS2 toolchain) — see "What's real vs. illustrative"
+below; it packages the real Python platform only. To also run the test suite
+or the CLI demo inside the container without a rebuild:
+
+```bash
+docker run --rm iac-robot-integration python -m pytest tests/ -v
+docker run --rm iac-robot-integration python demo/run_demo.py
+```
+
+`requirements.txt` has the core dependencies the image installs.
+`requirements-optional.txt` (playwright for re-recording the GUI video,
+anthropic for real LLM-powered fleet queries) is **not** installed by
+default — see that file for why.
+
 ## Multi-step missions, resilience, and fleet analytics
 
 Beyond the original single-step PoC above, the orchestration core now
@@ -265,6 +302,11 @@ contract either way.
   compiled or run against real middleware. `DESIGN.md` section 4 treats
   that verification (bench-testing an adapter against real hardware) as
   real first-30-days engineering work, not something to claim as done here.
+  `cpp_nodes/` follows a standard `ament_cmake` package layout
+  (`src/`/`launch/`/`config/`, declared ROS2 parameters instead of
+  hard-coded constants, `ament_lint_auto` test dependencies) and now covers
+  five subsystems — safety, motion relay, power, inspection payload, and
+  diagnostics aggregation — see `cpp_nodes/README.md` for the node topology.
 
 ## Layout
 
@@ -288,7 +330,7 @@ integration_layer/
     registry.py                     # fleet/capability registry
   adapters/ros2_generic/adapter.py  # ROS2 worked example (illustrative, see above)
   api/orchestration_service.py      # thin facade over MissionExecutor
-cpp_nodes/                           # latency-critical ROS2 nodes (illustrative)
+cpp_nodes/                            # ROS2 ament_cmake package, 5 nodes (illustrative, see cpp_nodes/README.md)
 mock_robot/
   mock_robot_node.py                # OEM adapter #1: local/ROS2-style
   cloud_fleet_adapter.py            # OEM adapter #2: cloud/REST-style

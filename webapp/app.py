@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import json
+import os
 import queue
 import threading
 
@@ -520,4 +521,11 @@ INDEX_HTML = (Path(__file__).resolve().parent / "templates" / "index.html").read
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5055, debug=False, threaded=True)
+    # Defaults to loopback-only for local dev; the Docker image sets
+    # WEBAPP_HOST=0.0.0.0 so the container's published port is actually
+    # reachable from outside it -- binding 0.0.0.0 by default on a
+    # developer's own machine would unnecessarily expose this demo app
+    # to the whole LAN.
+    host = os.environ.get("WEBAPP_HOST", "127.0.0.1")
+    port = int(os.environ.get("WEBAPP_PORT", "5055"))
+    app.run(host=host, port=port, debug=False, threaded=True)

@@ -9,7 +9,10 @@
 // robot's control interface directly.
 //
 // Illustrative: written against the rclcpp API surface for correctness of
-// shape, not built/run in this repo -- see README.md.
+// shape, not built/run in this repo -- see README.md. control_rate_hz and
+// target_stale_timeout_ms are declared ROS2 parameters (config/params.yaml)
+// rather than hard-coded, so the control rate can be tuned per platform
+// without a rebuild.
 
 #include <chrono>
 #include <memory>
@@ -24,6 +27,10 @@ namespace iac::integration_layer {
 class CommandBridgeNode : public rclcpp::Node {
  public:
   CommandBridgeNode() : rclcpp::Node("command_bridge_node") {
+    const auto control_rate_hz = declare_parameter<double>("control_rate_hz", 50.0);
+    const auto target_stale_timeout_ms = declare_parameter<int>("target_stale_timeout_ms", 300);
+    target_stale_timeout_ = std::chrono::milliseconds(target_stale_timeout_ms);
+
     // Target set by the Python adapter (low rate, "go roughly this way").
     target_sub_ = create_subscription<geometry_msgs::msg::Twist>(
         "/adapter/velocity_target", 10,
@@ -38,8 +45,10 @@ class CommandBridgeNode : public rclcpp::Node {
     // updates its target. If the adapter stops publishing, current_target_
     // holds the last value -- staleness is caught by the safety monitor's
     // watchdog, not by this node, keeping this node's only job the relay.
+    const auto period = std::chrono::duration<double>(1.0 / control_rate_hz);
     relay_timer_ = create_wall_timer(
-        20ms, std::bind(&CommandBridgeNode::relay_command, this));  // 50Hz
+        std::chrono::duration_cast<std::chrono::milliseconds>(period),
+        std::bind(&CommandBridgeNode::relay_command, this));
   }
 
  private:
@@ -53,14 +62,14 @@ class CommandBridgeNode : public rclcpp::Node {
     // control period we'd expect a live mission to refresh, publish zero
     // rather than repeat a possibly-stale command indefinitely.
     const auto stale_for = now() - last_target_time_;
-    if (stale_for > kTargetStaleTimeout) {
+    if (stale_for > target_stale_timeout_) {
       cmd_pub_->publish(geometry_msgs::msg::Twist());
       return;
     }
     cmd_pub_->publish(current_target_);
   }
 
-  static constexpr auto kTargetStaleTimeout = 300ms;
+  std::chrono::milliseconds target_stale_timeout_;
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr target_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;

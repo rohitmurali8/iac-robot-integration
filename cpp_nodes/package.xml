@@ -2,12 +2,15 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>iac_cpp_nodes</name>
-  <version>0.0.1</version>
+  <version>0.1.0</version>
   <description>
-    Latency-critical ROS2 nodes for the Robot Integration Layer:
-    safety_monitor_node (independent e-stop watchdog) and
-    command_bridge_node (high-rate command relay). Supervised by, but
-    independent of, the Python adapter layer -- see DESIGN.md section 1.
+    Latency-critical and subsystem-monitoring ROS2 nodes for the Robot
+    Integration Layer: safety_monitor_node (independent e-stop watchdog),
+    command_bridge_node (high-rate command relay), battery_monitor_node
+    (power subsystem), sensor_payload_node (inspection payload --
+    visual/thermal/gas), and diagnostics_aggregator_node (system-health
+    summary). Supervised by, but independent of, the Python adapter
+    layer -- see DESIGN.md section 1.
   </description>
   <maintainer email="you@example.com">your name</maintainer>
   <license>Apache-2.0</license>
@@ -17,7 +20,15 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>diagnostic_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

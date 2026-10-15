@@ -16,10 +16,15 @@ by," that's a real dependency, not a guess.
 DESIGN.md                      design doc (the spec this PoC implements)
 README.md                      how to run everything, what's real vs. illustrative
 REPOSITORY_STRUCTURE.md         this file
+Dockerfile                      runs webapp/app.py (or tests/demo) in a container -- real Python platform only
+docker-compose.yml              one-command `docker compose up --build`
+.dockerignore                   keeps .git/.venv/__pycache__ out of the build context
+requirements.txt                core deps the Docker image installs (Flask, pytest, matplotlib, pillow)
+requirements-optional.txt       playwright (GUI recording) + anthropic (real LLM queries) -- NOT in the image
 pyproject.toml                  pytest config (pythonpath=".", testpaths=["tests"])
 .gitignore                      ignores .venv/, __pycache__/, demo/output/video/frames/, deliveries/
 schemas/mission.proto           canonical wire contract (hand-mirrored in Python, see below)
-cpp_nodes/                      illustrative only -- not built or run, see "Illustrative vs. real" below
+cpp_nodes/                      illustrative only -- not built or run (not in the Docker image either), see below
 integration_layer/              the platform: capability model, mission schema, orchestration, OEM-agnostic core
 mock_robot/                     the two real (simulated) OEM robot adapters
 mock_customer/                  a real second Flask process simulating a customer's receiving system
@@ -41,6 +46,7 @@ These are the files you actually run; everything else is a library they import.
 | `.venv/bin/python webapp/app.py` | Starts the live GUI at `http://127.0.0.1:5055` |
 | `.venv/bin/python webapp/record_gui_demo.py` | Drives the real GUI in headless Chromium via Playwright, writes `webapp/output/` (screenshots + video) |
 | `.venv/bin/python docs/presentation/export_pdf.py` | Renders `docs/presentation/orchestration_walkthrough.html` to a 12-slide PDF |
+| `docker compose up --build` | Builds and runs `webapp/app.py` in a container, published at `http://127.0.0.1:5055` — see README.md's "Run it with Docker" |
 
 ## `integration_layer/core/` — the OEM-agnostic platform
 
@@ -75,10 +81,35 @@ exercised by both OEM adapters identically (that symmetry is what
 `adapter.py` here implements the same `RobotAdapter` interface as the two real
 adapters, written against the real `rclpy` API surface for shape-correctness, but
 there is no ROS2 install in this environment — it has never been compiled or run.
-`cpp_nodes/` (`safety_monitor_node.cpp`, `command_bridge_node.cpp`, `CMakeLists.txt`,
-`package.xml`) is the same story in C++. Neither is imported by anything that
-actually runs; they exist to prove the interface shape generalizes to a real ROS2
-deployment, not to claim that deployment was tested here.
+`cpp_nodes/` is the same story in C++, structured as a real standard `ament_cmake`
+package (not a flat file dump):
+
+```
+cpp_nodes/
+  package.xml                          # ament_cmake, declares rclcpp/sensor_msgs/
+                                        # geometry_msgs/std_msgs/std_srvs/diagnostic_msgs
+  CMakeLists.txt                       # 5 executables, ament_lint_auto test deps
+  README.md                            # package-local readme: node topology diagram
+  src/
+    safety_monitor_node.cpp            # independent e-stop watchdog
+    command_bridge_node.cpp            # high-rate velocity/joint command relay
+    battery_monitor_node.cpp           # power subsystem; calls /estop when critical
+    sensor_payload_node.cpp            # inspection payload: visual/thermal/gas capture
+    diagnostics_aggregator_node.cpp    # aggregates all of the above into /diagnostics
+  launch/bringup.launch.py             # brings up all 5 nodes with shared params
+  config/params.yaml                   # per-node tunables (declared ROS2 parameters,
+                                        # not hard-coded constants)
+```
+
+Neither this directory nor `ros2_generic/adapter.py` is imported by anything that
+actually runs in this repo; they exist to prove the interface/package shape
+generalizes to a real ROS2 deployment, not to claim that deployment was tested
+here. Each node still declares its tunables as proper ROS2 parameters (loaded from
+`config/params.yaml`) rather than hard-coded constants, and the five nodes
+coordinate purely through topics/services — e.g. `battery_monitor_node` calling
+`safety_monitor_node`'s `/estop` service directly, with neither node aware of the
+other's internals — the same loose-coupling pattern enforced between the two real
+Python OEM adapters.
 
 ## `mock_robot/` — the two real (simulated) OEM adapters
 

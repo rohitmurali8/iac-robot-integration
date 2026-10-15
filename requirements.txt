@@ -1,0 +1,8 @@
+# Core dependencies to run the GUI (webapp/app.py), the CLI demo
+# (demo/run_demo.py), and the full test suite. Versions are lower bounds
+# matching what this repo was actually built and tested against.
+Flask>=3.1
+Werkzeug>=3.1
+pytest>=9.1
+matplotlib>=3.11
+pillow>=12.0
