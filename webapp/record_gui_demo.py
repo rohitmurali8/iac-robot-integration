@@ -39,6 +39,13 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 
 MISSIONS = ["inspect_visual", "detect_gas", "inspect_thermal"]
 
+# Steps for the two live, multi-step missions the GUI exposes -- these
+# exercise the orchestration machinery (retry, cross-step sequencing,
+# post-mission delivery) that the three single-capability buttons above
+# don't: each of those is a single step with no retry/delivery story.
+LIVE_PATROL_STEPS_BUTTON = "#run-patrol-live-btn"
+LIVE_SWEEP_STEPS_BUTTON = "#run-sweep-live-btn"
+
 
 def transcode_to_mp4(webm_path: Path) -> Path | None:
     """Converts the Playwright-recorded .webm (VP8/Opus) to an H.264/
@@ -116,10 +123,16 @@ def main() -> None:
 
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
+            # Landscape, standard video-player aspect ratio -- a tall
+            # portrait viewport makes the recording nearly unreadable
+            # once played back at normal size. The page itself is much
+            # taller than this viewport; the script scrolls each new
+            # section into view as it's needed (see scrollIntoView calls
+            # below) instead of trying to show the whole page at once.
             context = browser.new_context(
-                viewport={"width": 1280, "height": 2000},
+                viewport={"width": 1280, "height": 800},
                 record_video_dir=str(OUTPUT_DIR),
-                record_video_size={"width": 1280, "height": 2000},
+                record_video_size={"width": 1280, "height": 800},
             )
             page = context.new_page()
             page.goto(BASE_URL)
@@ -127,6 +140,7 @@ def main() -> None:
 
             page.screenshot(path=str(OUTPUT_DIR / "screenshot_initial.png"))
             print("Captured initial screenshot (fleet loaded, no missions run).")
+            page.wait_for_timeout(4000)  # let the viewer actually see the empty starting state
 
             for capability in MISSIONS:
                 page.click(f'button[data-capability="{capability}"]')
@@ -134,13 +148,150 @@ def main() -> None:
                     "document.getElementById('last-result').textContent.includes('completed')"
                     " || document.getElementById('last-result').textContent.includes('failed')"
                 )
-                # Deliberate pause so the recording actually shows each
-                # result on screen rather than clicking through instantly.
-                page.wait_for_timeout(1200)
+                # Deliberate, generous pause so the recording actually
+                # shows each result on screen rather than clicking
+                # through instantly -- this script's whole job is to
+                # produce a watchable walkthrough, not just exercise
+                # the API as fast as possible.
+                page.wait_for_timeout(3500)
                 print(f"  ran {capability} mission")
 
-            page.screenshot(path=str(OUTPUT_DIR / "screenshot_final.png"))
-            print("Captured final screenshot (all three missions run, audit trail populated).")
+            # Prove the central platform-agnosticism claim live: the SAME
+            # "Run visual inspection mission" button, with ZERO code
+            # change, gets served by a completely different OEM adapter
+            # once the registered provider is swapped. This is the exact
+            # thing tests/test_platform_agnosticism.py pins at the code
+            # level -- here it's the same guarantee, visible on screen.
+            page.evaluate("document.getElementById('swap-provider-btn').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(1000)
+            page.click('button[data-capability="inspect_visual"]')
+            page.wait_for_function(
+                "document.getElementById('last-result').textContent.includes('completed')"
+            )
+            page.wait_for_timeout(2500)
+            print("  ran visual-inspection mission on the ORIGINAL provider (spot-01, MockRobotAdapter)")
+
+            page.click("#swap-provider-btn")
+            page.wait_for_function(
+                "document.getElementById('swap-result').textContent.includes('now served by')"
+            )
+            page.wait_for_timeout(3000)
+            print("  swapped the visual-inspection provider to a different OEM adapter class")
+
+            page.click('button[data-capability="inspect_visual"]')
+            page.wait_for_function(
+                "document.getElementById('last-result').textContent.includes('completed')"
+            )
+            page.wait_for_timeout(3500)
+            print("  ran the SAME button again -- now routed to the NEW provider (spot-01-cloud, CloudFleetAdapter)")
+
+            # Swap back so the rest of the recording (and the committed
+            # screenshots) reflect the default fleet, not the swapped one.
+            page.click("#swap-provider-btn")
+            page.wait_for_function(
+                "document.getElementById('swap-result').textContent.includes('now served by')"
+            )
+            page.wait_for_timeout(1500)
+            print("  swapped the provider back to the original adapter")
+
+            # The three single-capability buttons above each run exactly
+            # one step with no retry/delivery story. The rest of this
+            # script exercises the actual orchestration machinery this
+            # whole project is about: live multi-step execution, retry
+            # under an injected fault, mission log / delivery visibility,
+            # and the natural-language stats query -- so the recording
+            # shows the full pipeline, not just three button clicks.
+
+            def run_live_mission_and_wait(button_selector: str, label: str, hold_s: int) -> None:
+                page.click(button_selector)
+                page.wait_for_function(
+                    "document.querySelectorAll('#live-timeline .step-row').length > 0"
+                )
+                # Keep the timeline (not just the button) in frame for the
+                # hold -- in the landscape viewport the button and its
+                # results don't both fit on screen at once.
+                page.evaluate("document.getElementById('live-timeline').scrollIntoView({block: 'center'})")
+                page.wait_for_timeout(2000)  # let the SSE stream fully settle
+                page.wait_for_timeout(hold_s * 1000)  # deliberate hold so the timeline is readable
+                print(f"  ran live mission: {label}")
+
+            page.evaluate("document.getElementById('run-patrol-live-btn').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(1000)
+            run_live_mission_and_wait(LIVE_PATROL_STEPS_BUTTON, "patrol (nominal, multi-step)", hold_s=6)
+
+            # Inject a deterministic comms fault on spot-01, then re-run a
+            # live mission -- the timeline will show a retry-attempt row
+            # before the step resolves, demonstrating the module-aware
+            # retry policy live in the GUI, not just in a log file. This
+            # is the single most important moment in the recording, so
+            # it gets the longest hold.
+            page.evaluate("document.querySelector('[data-flaky-input=\"spot-01\"]').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(800)
+            page.fill('[data-flaky-input="spot-01"]', "2")
+            page.click('button[data-flaky-btn="spot-01"]')
+            page.wait_for_timeout(1000)
+            run_live_mission_and_wait(LIVE_SWEEP_STEPS_BUTTON, "sweep (comms fault, retries and recovers)", hold_s=9)
+            # Reset the fault so the fleet health panel ends the recording
+            # showing a clean, nominal state.
+            page.fill('[data-flaky-input="spot-01"]', "0")
+            page.click('button[data-flaky-btn="spot-01"]')
+            page.wait_for_timeout(1000)
+
+            # Take spot-01 offline and back online -- shows the network
+            # health pill react live, and that a mission attempted while
+            # offline fails deterministically (connectivity_lost) rather
+            # than hanging.
+            page.evaluate("document.querySelector('[data-toggle-offline=\"spot-01\"]').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(500)
+            page.click('[data-toggle-offline="spot-01"]')
+            page.wait_for_timeout(3500)
+            print("  took spot-01 offline (network pill updates live)")
+            page.click('[data-toggle-offline="spot-01"]')
+            page.wait_for_timeout(3500)
+            print("  brought spot-01 back online")
+
+            # Mission log + Deliveries panels: populated by clicking
+            # "View mission log" on a robot card.
+            page.evaluate("document.querySelector('[data-mission-log-btn=\"spot-01\"]').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(800)
+            page.click('button[data-mission-log-btn="spot-01"]')
+            page.wait_for_function(
+                "document.getElementById('mission-log-body').textContent.length > 0"
+            )
+            page.evaluate("document.getElementById('mission-log-body').scrollIntoView({block: 'start'})")
+            page.wait_for_timeout(2500)
+            page.evaluate("document.getElementById('deliveries-body').scrollIntoView({block: 'start'})")
+            page.wait_for_timeout(3500)
+            print("  loaded spot-01's mission log + deliveries")
+
+            # Ask-about-the-fleet: a real natural-language query against
+            # the live fleet/robot stats, answered by whichever engine is
+            # configured (template by default; Anthropic if
+            # ANTHROPIC_API_KEY is set in this environment).
+            page.evaluate("document.getElementById('ask-input').scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(800)
+            page.fill("#ask-input", "Which robot is the most reliable, and what's the fleet's overall success rate?")
+            page.click("#ask-btn")
+            page.wait_for_function(
+                "const t = document.getElementById('ask-answer').textContent;"
+                " t.length > 0 && !t.includes('Ask a question') && t !== 'Thinking...'"
+            )
+            page.wait_for_timeout(6500)
+            print("  asked a natural-language question about the fleet")
+
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(800)
+            page.screenshot(path=str(OUTPUT_DIR / "screenshot_final.png"), full_page=True)
+            print("Captured final screenshot (full page: missions, live retries, mission log, deliveries, analytics, ask-the-fleet).")
+
+            # Slow scroll through the whole page so the recording ends
+            # with a readable pass over every section, not a hard cut.
+            page_height = page.evaluate("document.body.scrollHeight")
+            scroll_steps = max(1, page_height // 500)
+            for i in range(scroll_steps + 1):
+                page.evaluate(f"window.scrollTo(0, {i * 500})")
+                page.wait_for_timeout(1200)
+            page.wait_for_timeout(3000)
 
             page.wait_for_timeout(500)
             video_path = page.video.path()

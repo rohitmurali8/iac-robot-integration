@@ -26,9 +26,12 @@ test suite.
 from __future__ import annotations
 
 import os
+import time
 from typing import Protocol
 
+from integration_layer.core import retry_policy
 from integration_layer.core.events import AuditEvent
+from integration_layer.core.mission import FailureReason
 from integration_layer.core.mission_analytics import FleetStats, RobotStats
 
 
@@ -117,10 +120,55 @@ class AnthropicStatsQueryEngine:
     """Real natural-language querying via the Anthropic Messages API.
     Requires `pip install anthropic` and ANTHROPIC_API_KEY for real use
     (client=None, the production path). The actual HTTP call is isolated
-    in _call_api() so tests can substitute a fake client."""
+    in _call_api() so tests can substitute a fake client.
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-5", client=None) -> None:
+    Model-serving hardening, all reusing machinery already proven
+    elsewhere in this codebase rather than inventing new patterns:
+    - A bounded per-request timeout (request_timeout_s) so a hung API
+      call can never block a Flask request thread indefinitely.
+    - Retry-with-backoff on failure, via the SAME retry_policy.py COMMS
+      table (strategy_for/backoff_for_attempt) that governs mission-step
+      and webhook-delivery retries -- an LLM call failing transiently is
+      modeled as the same kind of comms failure, not a bespoke retry loop.
+      poll_interval_s gates whether backoff actually sleeps (default 0.0,
+      same idiom as StepRunner/DeliveryService) so the test suite stays
+      fast by default while production can opt into real delays.
+    - Graceful degradation: if every retry attempt fails, falls back to
+      TemplateStatsQueryEngine rather than raising -- the caller always
+      gets a useful answer, never a 500. last_call_used_fallback is set
+      so a caller (the webapp route) can report the degraded engine
+      honestly instead of silently claiming "anthropic" answered.
+    - A small in-memory cache keyed on (question, a cheap signature of
+      the stats snapshot) avoids paying for a duplicate call when the
+      same question is asked again against unchanged data -- the
+      signature changes the instant any mission completes, so a cached
+      answer is never served once the underlying data has moved on.
+      Fallback answers are deliberately never cached, so a transient
+      outage can't poison later responses once the API recovers.
+
+    Explicitly NOT built, as a documented scope boundary consistent with
+    this repo's "what's real vs. illustrative" practice: no cross-request
+    rate limiting or spend cap on the /api/stats/query endpoint, and no
+    model routing beyond the template-vs-LLM split that already exists
+    (TemplateStatsQueryEngine handles the common questions for free and
+    with zero latency; the LLM is only invoked for genuinely open-ended
+    ones). Streaming isn't implemented either -- answers are capped at
+    1-3 sentences by the prompt itself, so there's nothing to stream."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-sonnet-5",
+        client=None,
+        request_timeout_s: float = 10.0,
+        poll_interval_s: float = 0.0,
+    ) -> None:
         self._model = model
+        self._request_timeout_s = request_timeout_s
+        self._poll_interval_s = poll_interval_s
+        self._fallback = TemplateStatsQueryEngine()
+        self._cache: dict[tuple, str] = {}
+        self.last_call_used_fallback = False
         if client is not None:
             self._client = client
         else:
@@ -135,8 +183,64 @@ class AnthropicStatsQueryEngine:
         robot_stats: dict[str, RobotStats],
         recent_events: list[AuditEvent],
     ) -> str:
+        self.last_call_used_fallback = False
+        cache_key = self._cache_key(question, fleet_stats, robot_stats)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         prompt = self._build_prompt(question, fleet_stats, robot_stats, recent_events)
-        return self._call_api(prompt)
+        try:
+            answer = self._call_api_with_retry(prompt)
+        except Exception:
+            self.last_call_used_fallback = True
+            return self._fallback.answer(question, fleet_stats, robot_stats, recent_events)
+
+        self._cache[cache_key] = answer
+        return answer
+
+    def _cache_key(
+        self, question: str, fleet_stats: FleetStats, robot_stats: dict[str, RobotStats]
+    ) -> tuple:
+        """Cheap, deterministic signature of the stats snapshot -- not a
+        hash of everything, just enough fields that any mission outcome
+        changes it, so a cached answer can never be served once the data
+        it was computed against is stale."""
+        robot_signature = tuple(
+            sorted((rid, s.missions_run, s.missions_succeeded, s.total_retries) for rid, s in robot_stats.items())
+        )
+        return (
+            question.strip().lower(),
+            fleet_stats.total_missions,
+            fleet_stats.total_succeeded,
+            fleet_stats.total_failed,
+            robot_signature,
+        )
+
+    def _call_api_with_retry(self, prompt: str) -> str:
+        """Retries via the SAME COMMS RetryStrategy (max_attempts=4,
+        backoff_s=(0.0, 1.0, 2.0)) that governs mission-step and
+        webhook-delivery retries elsewhere in this codebase -- an LLM
+        call failing is treated as a comms failure, not a reason to
+        invent a second retry table. Catches a broad Exception (rather
+        than specific anthropic.* exception classes) deliberately: this
+        module imports `anthropic` lazily and never at module level, and
+        tests inject fake clients that may raise plain built-in
+        exceptions to simulate failure -- narrowing the catch to real SDK
+        exception types would require a hard import this module is
+        designed to avoid."""
+        strategy = retry_policy.strategy_for(FailureReason.CONNECTIVITY_LOST)  # COMMS strategy
+        attempt = 1
+        while True:
+            try:
+                return self._call_api(prompt)
+            except Exception:
+                if attempt >= strategy.max_attempts:
+                    raise
+                backoff = retry_policy.backoff_for_attempt(strategy, attempt + 1)
+                if self._poll_interval_s and backoff:
+                    time.sleep(backoff)
+                attempt += 1
 
     def _build_prompt(
         self,
@@ -186,6 +290,7 @@ class AnthropicStatsQueryEngine:
             model=self._model,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
+            timeout=self._request_timeout_s,
         )
         return response.content[0].text
 

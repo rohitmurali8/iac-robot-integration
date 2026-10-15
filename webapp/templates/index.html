@@ -87,9 +87,11 @@
       <button data-capability="inspect_visual">Run visual inspection mission</button>
       <button data-capability="detect_gas">Run gas detection mission</button>
       <button data-capability="inspect_thermal">Run thermal inspection mission</button>
+      <button id="swap-provider-btn" title="Unregisters whichever robot currently serves visual inspection and registers a DIFFERENT OEM adapter class in its place -- no platform/GUI code changes, same button above routes to whoever is registered.">Swap visual-inspection provider (demo)</button>
       <button class="reset" id="reset-btn">Reset fleet + audit log</button>
     </div>
     <div id="last-result">No mission run yet.</div>
+    <div id="swap-result" style="margin-top:8px; font-size:12px; color:#9aa3b5;"></div>
   </section>
 
   <section class="wide">
@@ -483,6 +485,22 @@ async function runMission(capability) {
 
 document.querySelectorAll("button[data-capability]").forEach(btn => {
   btn.addEventListener("click", () => runMission(btn.dataset.capability));
+});
+
+document.getElementById("swap-provider-btn").addEventListener("click", async () => {
+  const box = document.getElementById("swap-result");
+  box.textContent = "Swapping visual-inspection provider...";
+  const res = await fetch("/api/admin/swap_visual_provider", { method: "POST" });
+  const data = await res.json();
+  if (!res.ok) {
+    box.textContent = `Error: ${data.error}`;
+    return;
+  }
+  box.innerHTML =
+    `Visual inspection now served by <b>${data.swapped_to.robot_id}</b> (${data.swapped_to.adapter_type}) ` +
+    `-- was <b>${data.swapped_from.robot_id}</b> (${data.swapped_from.adapter_type}). ` +
+    `Same "Run visual inspection mission" button above, zero platform code changed.`;
+  await loadFleet();
 });
 
 document.getElementById("reset-btn").addEventListener("click", async () => {

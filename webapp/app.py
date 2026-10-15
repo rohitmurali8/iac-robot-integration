@@ -432,14 +432,76 @@ def api_stats_query():
         return jsonify({"error": "question is required"}), 400
 
     engine = get_query_engine()
-    engine_name = "anthropic" if isinstance(engine, AnthropicStatsQueryEngine) else "template"
+    is_anthropic = isinstance(engine, AnthropicStatsQueryEngine)
 
     fleet_stats = service.get_fleet_stats()
     robot_stats = {robot_id: service.get_robot_stats(robot_id) for robot_id in registry.all_robot_ids()}
     recent_events = audit_log.all_events()[-20:]
 
     answer = engine.answer(question, fleet_stats, robot_stats, recent_events)
+    # Report "anthropic_fallback" rather than "anthropic" when the real API
+    # call failed after retries and AnthropicStatsQueryEngine silently
+    # degraded to its own internal template engine -- the caller still gets
+    # a useful answer, but this repo's practice is to never claim a real LLM
+    # answered when it didn't.
+    if is_anthropic and engine.last_call_used_fallback:
+        engine_name = "anthropic_fallback"
+    elif is_anthropic:
+        engine_name = "anthropic"
+    else:
+        engine_name = "template"
     return jsonify({"answer": answer, "engine": engine_name})
+
+
+def _current_visual_provider_robot_id() -> str | None:
+    """Whichever registered robot currently advertises INSPECT_VISUAL,
+    excluding fleetx-01 (which serves a different capability entirely
+    and must never be touched by this swap). None if no robot currently
+    advertises it."""
+    for robot_id in registry.all_robot_ids():
+        if robot_id == "fleetx-01":
+            continue
+        adapter = registry.get(robot_id)
+        if any(c.capability_type == CapabilityType.INSPECT_VISUAL for c in adapter.get_capabilities()):
+            return robot_id
+    return None
+
+
+@app.post("/api/admin/swap_visual_provider")
+def api_swap_visual_provider():
+    """Demo-only endpoint proving the platform-switching story
+    test_platform_agnosticism.py already pins at the code level, live
+    in the running GUI: unregisters whichever robot currently serves
+    INSPECT_VISUAL and registers a DIFFERENT adapter -- a different OEM
+    class entirely, not merely a different instance of the same class
+    -- in its place. Toggles back and forth (Mock <-> Cloud) so this can
+    be clicked repeatedly in a demo/recording. Nothing about
+    OrchestrationService, the mission-control buttons, or any other
+    route changes because of this call -- the next "Run visual
+    inspection mission" click resolves by capability exactly as it
+    always does, and simply reaches whichever adapter is now
+    registered."""
+    current_id = _current_visual_provider_robot_id()
+    if current_id is None:
+        return jsonify({"error": "no robot currently serves inspect_visual"}), 409
+
+    current_adapter = registry.get(current_id)
+    current_type = type(current_adapter).__name__
+    registry.unregister(current_id)
+
+    if current_type == "CloudFleetAdapter":
+        new_adapter = MockRobotAdapter(robot_id="spot-01", payload={"visual_camera", "thermal_camera"})
+    else:
+        new_adapter = CloudFleetAdapter(robot_id="spot-01-cloud", fleet_manifest={"sensors": ["rgb_cam"]})
+    registry.register(new_adapter)
+
+    return jsonify(
+        {
+            "swapped_from": {"robot_id": current_id, "adapter_type": current_type},
+            "swapped_to": {"robot_id": new_adapter.robot_id, "adapter_type": type(new_adapter).__name__},
+            "fleet": _fleet_snapshot(),
+        }
+    )
 
 
 @app.post("/api/reset")

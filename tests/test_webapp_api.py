@@ -185,6 +185,83 @@ def test_stats_query_endpoint_returns_template_answer_by_default(client, monkeyp
     assert data["answer"]
 
 
+def test_stats_query_endpoint_reports_anthropic_fallback_when_api_call_fails(client, monkeypatch):
+    from integration_layer.core.stats_query import AnthropicStatsQueryEngine
+
+    class _AlwaysFailClient:
+        def __init__(self):
+            self.messages = self
+
+        def create(self, **kwargs):
+            raise RuntimeError("simulated API outage")
+
+    failing_engine = AnthropicStatsQueryEngine(api_key="fake", client=_AlwaysFailClient())
+    monkeypatch.setattr("webapp.app.get_query_engine", lambda: failing_engine)
+
+    res = client.post("/api/stats/query", json={"question": "what's the fleet success rate?"})
+    data = res.get_json()
+
+    assert res.status_code == 200
+    assert data["engine"] == "anthropic_fallback"
+    assert data["answer"]  # still a real, useful answer -- never a 500
+
+
+def test_swap_visual_provider_switches_oem_adapter_class(client):
+    before = client.get("/api/fleet").get_json()
+    before_visual = next(r for r in before if "inspect_visual" in r["capabilities"])
+    assert before_visual["robot_id"] == "spot-01"
+    assert before_visual["adapter_type"] == "MockRobotAdapter"
+
+    res = client.post("/api/admin/swap_visual_provider")
+    data = res.get_json()
+
+    assert res.status_code == 200
+    assert data["swapped_from"] == {"robot_id": "spot-01", "adapter_type": "MockRobotAdapter"}
+    assert data["swapped_to"] == {"robot_id": "spot-01-cloud", "adapter_type": "CloudFleetAdapter"}
+
+    after = client.get("/api/fleet").get_json()
+    after_visual = next(r for r in after if "inspect_visual" in r["capabilities"])
+    assert after_visual["robot_id"] == "spot-01-cloud"
+    assert after_visual["adapter_type"] == "CloudFleetAdapter"
+
+    # The SAME platform call, zero code changes, now reaches the new adapter.
+    mission_res = client.post("/api/missions", json={"capability": "inspect_visual"})
+    mission_data = mission_res.get_json()
+    assert mission_data["robot_id"] == "spot-01-cloud"
+    assert mission_data["adapter_type"] == "CloudFleetAdapter"
+    assert mission_data["status"] == "completed"
+
+
+def test_swap_visual_provider_toggles_back_on_second_call(client):
+    client.post("/api/admin/swap_visual_provider")  # Mock -> Cloud
+
+    res = client.post("/api/admin/swap_visual_provider")  # Cloud -> Mock
+    data = res.get_json()
+
+    assert data["swapped_from"] == {"robot_id": "spot-01-cloud", "adapter_type": "CloudFleetAdapter"}
+    assert data["swapped_to"] == {"robot_id": "spot-01", "adapter_type": "MockRobotAdapter"}
+
+
+def test_swap_visual_provider_never_touches_fleetx(client):
+    client.post("/api/admin/swap_visual_provider")
+
+    fleet = client.get("/api/fleet").get_json()
+    fleetx = next(r for r in fleet if r["robot_id"] == "fleetx-01")
+    assert fleetx["adapter_type"] == "CloudFleetAdapter"
+    assert "detect_gas" in fleetx["capabilities"]
+
+
+def test_reset_restores_default_visual_provider(client):
+    client.post("/api/admin/swap_visual_provider")  # Mock -> Cloud
+
+    client.post("/api/reset")
+
+    fleet = client.get("/api/fleet").get_json()
+    visual = next(r for r in fleet if "inspect_visual" in r["capabilities"])
+    assert visual["robot_id"] == "spot-01"
+    assert visual["adapter_type"] == "MockRobotAdapter"
+
+
 def test_reset_also_clears_stats(client):
     client.post("/api/missions", json={"capability": "inspect_visual"})
     assert client.get("/api/stats/fleet").get_json()["total_missions"] > 0

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IAC Robot Integration Layer — Orchestration Walkthrough</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0b0d14; }
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #e6e6e6; }
+
+  .slide {
+    width: 1280px;
+    min-height: 720px;
+    padding: 56px 72px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    background: linear-gradient(180deg, #11131c 0%, #0b0d14 100%);
+    border-bottom: 1px solid #1f2330;
+  }
+  @media print {
+    @page { size: 1280px 720px; margin: 0; }
+    .slide { page-break-after: always; border-bottom: none; }
+  }
+
+  .kicker { color: #8fb4ff; font-size: 14px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; margin-bottom: 10px; }
+  h1 { font-size: 40px; margin: 0 0 6px; color: #fff; }
+  h2 { font-size: 30px; margin: 0 0 24px; color: #fff; }
+  .subtitle { font-size: 18px; color: #9aa3b5; margin-bottom: 28px; }
+  p { font-size: 17px; line-height: 1.6; color: #cfd4e0; }
+  ul { font-size: 17px; line-height: 1.75; color: #cfd4e0; padding-left: 22px; }
+  li strong { color: #fff; }
+  code {
+    background: #1b1f2b; border: 1px solid #38415a; color: #9fd0ff;
+    border-radius: 5px; padding: 2px 7px; font-size: 15px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre {
+    background: #10131c; border: 1px solid #262c3d; border-radius: 10px;
+    padding: 18px 22px; font-size: 15px; line-height: 1.6; color: #d8f5c9;
+    font-family: "SF Mono", Menlo, Consolas, monospace; overflow: auto;
+  }
+  .pill { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+  .pill-blue { background: #1a2d52; color: #8fb4ff; }
+  .pill-green { background: #16351e; color: #8fe39a; }
+  .pill-purple { background: #2a1a52; color: #c3a6ff; }
+  .pill-amber { background: #3a2a10; color: #ffcf7a; }
+
+  .flow { display: flex; align-items: center; gap: 14px; margin: 30px 0; flex-wrap: wrap; }
+  .box {
+    background: #161a26; border: 1px solid #2d3447; border-radius: 10px;
+    padding: 16px 20px; font-size: 15px; min-width: 150px; text-align: center;
+  }
+  .box .label { color: #fff; font-weight: 600; margin-bottom: 4px; }
+  .box .sub { color: #8f97ab; font-size: 12px; }
+  .arrow { color: #5a6378; font-size: 22px; }
+
+  .two-col { display: flex; gap: 40px; flex: 1; }
+  .two-col > div { flex: 1; }
+
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; border-radius: 50%; background: #1a2d52;
+    color: #8fb4ff; font-weight: 700; font-size: 16px; margin-right: 14px;
+  }
+  .step-title { display: flex; align-items: center; font-size: 24px; color: #fff; margin-bottom: 14px; }
+
+  .shot { border: 1px solid #2d3447; border-radius: 10px; max-width: 100%; margin-top: 14px; }
+  .shot-frame { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .shot-frame img { width: 1120px; border-radius: 10px; border: 1px solid #2d3447; object-fit: cover; object-position: top; height: 470px; }
+
+  .footer-note { margin-top: auto; padding-top: 18px; font-size: 13px; color: #5a6378; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 18px; }
+  .card { background: #161a26; border: 1px solid #2d3447; border-radius: 10px; padding: 18px; }
+  .card h3 { font-size: 16px; color: #fff; margin: 0 0 8px; }
+  .card p { font-size: 14px; margin: 0; color: #9aa3b5; }
+</style>
+</head>
+<body>
+
+<!-- Slide 1: Title -->
+<section class="slide">
+  <div class="kicker">IAC Robot Integration Layer</div>
+  <h1 style="font-size:52px; margin-top:140px;">Orchestration Walkthrough</h1>
+  <div class="subtitle" style="font-size:22px;">Two genuinely different OEM robot adapters. One platform API.<br>A real, running, tested proof of concept — not a diagram.</div>
+  <div style="margin-top:50px;">
+    <span class="pill pill-blue">MockRobotAdapter (local / ROS2-style)</span>
+    &nbsp;&nbsp;<span class="pill pill-purple">CloudFleetAdapter (cloud / REST-style)</span>
+  </div>
+  <div class="footer-note">See the companion video: <code>webapp/output/gui_demo.mp4</code> — the same system, driven live in a real browser.</div>
+</section>
+
+<!-- Slide 2: What this proves -->
+<section class="slide">
+  <div class="kicker">Why this exists</div>
+  <h2>What the working proof of concept demonstrates</h2>
+  <ul>
+    <li><strong>Supports at least two different robots / OEM interfaces</strong> — a local ROS2-style robot and a cloud REST-style fleet API, implemented as genuinely different internal mechanics (session tokens vs. topics, async job polling vs. direct calls, different battery field names and error vocabularies).</li>
+    <li><strong>Uses the same high-level commands and normalized states across both</strong> — one <code>Mission</code>/<code>MissionStep</code>/<code>MissionStepStatus</code>/<code>FailureReason</code> schema, shared by every adapter.</li>
+    <li><strong>Keeps all OEM-specific behavior inside separate adapters</strong> — <code>mock_robot_node.py</code> and <code>cloud_fleet_adapter.py</code> are the only two files that know anything vendor-specific.</li>
+    <li><strong>Lets the underlying robot be switched without touching the platform API</strong> — capability-based routing, enforced by a pinned test (<code>test_platform_agnosticism.py</code>) that has shown a byte-identical diff since before this round of work began.</li>
+    <li><strong>Includes a real visual demonstration</strong> — screenshots, a recorded GUI session, and a CLI pipeline video.</li>
+    <li><strong>Has tests and clear run instructions</strong> — 195 automated tests, documented below.</li>
+  </ul>
+</section>
+
+<!-- Slide 3: Architecture -->
+<section class="slide">
+  <div class="kicker">Architecture</div>
+  <h2>One call path, every mission, regardless of OEM</h2>
+  <div class="flow">
+    <div class="box"><div class="label">Orchestration core</div><div class="sub">caller / UI / CLI</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">OrchestrationService</div><div class="sub">thin public facade</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">MissionExecutor</div><div class="sub">cross-step sequencing</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">StepRunner</div><div class="sub">single-step + retry</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">RobotAdapter</div><div class="sub">MockRobotAdapter<br>or CloudFleetAdapter</div></div>
+  </div>
+  <p>Every box above is independently testable in isolation. A bug in retry handling cannot hide inside cross-step sequencing, and a bug in sequencing cannot hide inside a specific adapter's quirks — each layer is unit-tested against a stub for the layer below it, and integration-tested end to end against the two real adapters.</p>
+  <div class="grid3">
+    <div class="card"><h3>AdapterRegistry</h3><p>Capability-based lookup — "who can do X right now" — never a hardcoded robot name.</p></div>
+    <div class="card"><h3>AuditLog</h3><p>Indexed by mission and robot at write time — O(k) reads, not a full scan.</p></div>
+    <div class="card"><h3>MissionAnalytics</h3><p>Incremental fleet/robot stats, updated automatically the instant a mission ends.</p></div>
+  </div>
+</section>
+
+<!-- Slide 4: Step 1 -->
+<section class="slide">
+  <div class="step-title"><span class="step-num">1</span>Mission assignment</div>
+  <p><code>OrchestrationService.assign_mission(mission)</code> resolves which robot serves the mission's first step by capability (or honors an explicit pin), records a <code>mission_assigned</code> audit event, and makes exactly one <code>execute_mission_step()</code> call — then returns immediately.</p>
+  <pre>mission = Mission(mission_id="m-1", steps=[MissionStep(capability_type=INSPECT_THERMAL, target="wp1")])
+service.assign_mission(mission)   # non-blocking: kicks off step 0, returns promptly
+status = service.wait_for_completion("m-1")   # polls/advances/retries to terminal</pre>
+  <p>This non-blocking contract is deliberately pinned: a caller gets an immediate <code>ASSIGNED</code>/<code>IN_PROGRESS</code> status back, never a long blocking call — orchestration core stays in control of polling cadence.</p>
+</section>
+
+<!-- Slide 5: Step 2 -->
+<section class="slide">
+  <div class="step-title"><span class="step-num">2</span>Step execution &amp; live progress</div>
+  <p><code>StepRunner</code> owns exactly one step's execution, polling <code>get_status()</code> to a terminal result and firing a progress callback after <strong>every single poll</strong> — not just the final one. <code>MissionExecutor</code> composes <code>StepRunner</code> across however many steps a mission has, re-resolving the adapter for each step (so a multi-step mission can genuinely span two different robots).</p>
+  <pre>def on_progress(status):
+    print(f"step {status.step_index}: {status.status.value}")
+
+service.run_mission_with_progress(mission, on_progress)
+# step 0: in_progress
+# step 0: completed
+# step 1: in_progress
+# step 1: completed</pre>
+  <p>The GUI's live timeline and the <code>/api/missions/&lt;id&gt;/stream</code> Server-Sent-Events endpoint are both built directly on this same callback — nothing is polled or re-derived separately for the browser.</p>
+</section>
+
+<!-- Slide 6: Step 3 -->
+<section class="slide">
+  <div class="step-title"><span class="step-num">3</span>Fault injection &amp; module-aware retry</div>
+  <p>Every failure is classified into a <code>SystemModule</code> (comms / sensor / power / safety / planning), and each module has its own retry policy — a literal, readable table, not an if/elif chain.</p>
+  <pre>COMMS:    retryable, 4 attempts, backoff 0.0s / 1.0s / 2.0s
+SENSOR:   never retries, pauses for operator intervention
+POWER:    never retries, mission aborts
+SAFETY:   never retries, pauses for operator intervention
+PLANNING: never retries, mission aborts</pre>
+  <p>Faults are <strong>hybrid</strong>: deterministic primitives (<code>set_offline</code>, <code>set_flaky(n)</code>, <code>set_sensor_failed</code>) for reproducible demos and tests, and probabilistic ones (seeded <code>random_failure_rates</code>) for realistic unpredictable field conditions — both funnel through the exact same retry table.</p>
+</section>
+
+<!-- Slide 7: Step 4 -->
+<section class="slide">
+  <div class="step-title"><span class="step-num">4</span>Post-mission analytics — automatic</div>
+  <p>The instant a mission reaches any terminal state (completed, failed, aborted, or paused-for-intervention), <code>MissionAnalytics.record_mission_outcome()</code> fires with no manual trigger and no batch job. Reading current stats afterward is an O(1) dict lookup, never a replay of the audit log.</p>
+  <div class="flow" style="margin-top:34px;">
+    <div class="box"><div class="label">Mission ends</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">RobotStats updated</div><div class="sub">success rate, retries by module</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">FleetStats updated</div><div class="sub">overall success rate, failures by module</div></div>
+  </div>
+  <p>The GUI's Fleet Analytics panel and the "Ask about the fleet" natural-language query box (template engine by default, real Anthropic Claude if <code>ANTHROPIC_API_KEY</code> is set) both read directly from this live state.</p>
+</section>
+
+<!-- Slide 8: Step 5 -->
+<section class="slide">
+  <div class="step-title"><span class="step-num">5</span>Data capture, upload &amp; customer delivery</div>
+  <p>On a <strong>COMPLETED</strong> mission only: sensor-capability steps captured a local artifact as they completed (no network); the robot then batch-uploads everything to the platform in a <strong>single</strong> network-dependent step — reusing the exact same <code>FaultProfile</code> and COMMS retry policy from slide 6, not a separate retry mechanism.</p>
+  <div class="flow">
+    <div class="box"><div class="label">Local capture</div><div class="sub">per sensor step, no network</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">Batch upload</div><div class="sub">retried via retry_policy</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">Zip package</div><div class="sub">report + artifacts</div></div>
+    <div class="arrow">&rarr;</div>
+    <div class="box"><div class="label">Webhook push</div><div class="sub">real local HTTP, retried</div></div>
+  </div>
+  <p>Customers are matched by <code>CustomerRegistry</code> (which robots are at their site, which capabilities they subscribe to) and receive a real HTTP POST — <code>mock_customer/customer_server.py</code> is a genuine second Flask process, not a stub.</p>
+</section>
+
+<!-- Slide 9: GUI screenshot -->
+<section class="slide">
+  <div class="kicker">See it live</div>
+  <h2>The GUI shows every layer above, in real time</h2>
+  <div class="shot-frame">
+    <img src="../../webapp/output/screenshot_final.png" alt="GUI screenshot showing fleet, live mission timeline, audit trail, mission log, deliveries, and fleet analytics">
+  </div>
+  <div class="footer-note">Full recorded session (60+ seconds, real headless-Chromium click-through): <code>webapp/output/gui_demo.mp4</code></div>
+</section>
+
+<!-- Slide 10: Run it yourself, setup -->
+<section class="slide">
+  <div class="kicker">Run it yourself</div>
+  <h2>1. Setup &amp; test suite</h2>
+  <pre>cd iac-robot-integration
+python3 -m venv .venv
+.venv/bin/pip install pytest matplotlib pillow flask
+.venv/bin/python -m pytest tests/ -v
+# 195/195 -- conformance, platform-agnosticism, retry/fault-injection,
+# analytics, LLM-query, and data-delivery, all passing</pre>
+  <p>No ROS2 install, no real robot hardware, no cloud account, and no network access required — everything here is pure Python, runs fully offline, and the test suite makes zero real network calls (the one optional exception, a real Anthropic API call, is gated behind an environment variable you have to opt into).</p>
+</section>
+
+<!-- Slide 11: Run it yourself, try it -->
+<section class="slide">
+  <div class="kicker">Run it yourself</div>
+  <h2>2. Try the CLI demo and the live GUI</h2>
+  <pre>.venv/bin/python demo/run_demo.py
+# runs 3 missions across both OEMs, then a 4-posture resilience demo,
+# then a real local webhook-delivery demo -- writes demo/output/
+
+.venv/bin/python webapp/app.py
+# open http://127.0.0.1:5055 in a browser -- click through the live GUI
+
+.venv/bin/pip install playwright
+.venv/bin/playwright install chromium
+.venv/bin/python webapp/record_gui_demo.py
+# re-records webapp/output/gui_demo.mp4 against the real running app</pre>
+  <p>Every one of these runs the <strong>actual</strong> platform code — nothing here is a mockup, a staged recording, or hand-edited output.</p>
+</section>
+
+<!-- Slide 12: Where to find evidence -->
+<section class="slide">
+  <div class="kicker">Where to find everything</div>
+  <h2>Evidence index</h2>
+  <div class="grid3">
+    <div class="card"><h3>Design</h3><p><code>DESIGN.md</code> — the full design doc this PoC implements.</p></div>
+    <div class="card"><h3>Read first</h3><p><code>README.md</code> — architecture, what's real vs. illustrative, full layout.</p></div>
+    <div class="card"><h3>This deck</h3><p><code>docs/presentation/orchestration_walkthrough.pdf</code></p></div>
+    <div class="card"><h3>GUI video</h3><p><code>webapp/output/gui_demo.mp4</code> — live, recorded, &gt;60s.</p></div>
+    <div class="card"><h3>GUI screenshots</h3><p><code>webapp/output/screenshot_initial.png</code> / <code>screenshot_final.png</code></p></div>
+    <div class="card"><h3>CLI pipeline video</h3><p><code>demo/output/video/pipeline_demo.gif</code> / <code>.mp4</code></p></div>
+    <div class="card"><h3>CLI output</h3><p><code>demo/output/demo_run.txt</code>, <code>mission_timeline.png</code></p></div>
+    <div class="card"><h3>Delivered packages</h3><p><code>demo/output/deliveries/*.zip</code> — real mission report packages.</p></div>
+    <div class="card"><h3>Tests</h3><p><code>tests/</code> — 195 automated tests, run with <code>pytest tests/ -v</code>.</p></div>
+  </div>
+  <div class="footer-note">Every artifact above was produced by actually running the real code in this repository — none of it is hand-authored or illustrative.</div>
+</section>
+
+</body>
+</html>

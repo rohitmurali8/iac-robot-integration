@@ -44,6 +44,37 @@ class FakeAnthropicClient:
         return _FakeResponse(self._scripted_response_text)
 
 
+class FakeFlakyAnthropicClient:
+    """Raises a plain RuntimeError on its first `fail_count` calls, then
+    succeeds -- simulates a transient API failure recovering within the
+    retry budget, without needing any real anthropic exception type."""
+
+    def __init__(self, scripted_response_text: str, fail_count: int):
+        self._scripted_response_text = scripted_response_text
+        self._fail_count = fail_count
+        self.messages = self
+        self.create_calls = []
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        if len(self.create_calls) <= self._fail_count:
+            raise RuntimeError("simulated transient API failure")
+        return _FakeResponse(self._scripted_response_text)
+
+
+class FakeAlwaysFailAnthropicClient:
+    """Always raises -- simulates an API outage that outlasts the whole
+    retry budget, to exercise the fallback-to-template path."""
+
+    def __init__(self):
+        self.messages = self
+        self.create_calls = []
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        raise RuntimeError("simulated persistent API failure")
+
+
 def test_template_engine_answers_fleet_success_rate():
     engine = TemplateStatsQueryEngine()
     fleet_stats = FleetStats(total_missions=4, total_succeeded=3, total_failed=1)
@@ -146,3 +177,82 @@ def test_anthropic_engine_prompt_includes_question_and_real_stats():
     prompt = client.create_calls[0]["messages"][0]["content"]
     assert question in prompt
     assert str(fleet_stats.total_missions) in prompt
+
+
+def test_anthropic_engine_passes_request_timeout_to_the_api_call():
+    client = FakeAnthropicClient("ok")
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client, request_timeout_s=7.5)
+
+    engine.answer("how's the fleet?", FleetStats(), {}, [])
+
+    assert client.create_calls[0]["timeout"] == 7.5
+
+
+def test_anthropic_engine_retries_transient_failure_then_succeeds():
+    client = FakeFlakyAnthropicClient("recovered", fail_count=2)
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client)
+
+    answer = engine.answer("how's the fleet?", FleetStats(), {}, [])
+
+    # COMMS strategy allows 4 attempts -- 2 failures then success is
+    # within budget, and the real exception path (not a stub) was
+    # actually exercised twice before succeeding.
+    assert answer == "recovered"
+    assert len(client.create_calls) == 3
+    assert engine.last_call_used_fallback is False
+
+
+def test_anthropic_engine_falls_back_to_template_after_exhausting_retries():
+    client = FakeAlwaysFailAnthropicClient()
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client)
+    fleet_stats = FleetStats(total_missions=4, total_succeeded=3, total_failed=1)
+
+    answer = engine.answer("what's the fleet-wide success rate?", fleet_stats, {}, [])
+
+    # Exactly 4 attempts (the COMMS strategy's max_attempts) before
+    # giving up and falling back -- never an unbounded retry loop.
+    assert len(client.create_calls) == 4
+    assert engine.last_call_used_fallback is True
+    # The fallback is a REAL TemplateStatsQueryEngine answer, not an
+    # error message -- the caller gets something useful either way.
+    assert "75.0%" in answer
+
+
+def test_anthropic_engine_never_caches_a_fallback_answer():
+    client = FakeAlwaysFailAnthropicClient()
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client)
+    fleet_stats = FleetStats(total_missions=4, total_succeeded=3, total_failed=1)
+
+    engine.answer("what's the fleet-wide success rate?", fleet_stats, {}, [])
+    calls_after_first = len(client.create_calls)
+    engine.answer("what's the fleet-wide success rate?", fleet_stats, {}, [])
+
+    # If the fallback answer had been cached, the second call would have
+    # made zero further API attempts. It must retry again instead --
+    # a transient outage recovering later shouldn't be masked forever by
+    # a cached degraded answer.
+    assert len(client.create_calls) == calls_after_first * 2
+
+
+def test_anthropic_engine_caches_repeated_question_against_unchanged_stats():
+    client = FakeAnthropicClient("cached answer")
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client)
+    fleet_stats = FleetStats(total_missions=4, total_succeeded=3, total_failed=1)
+
+    first = engine.answer("how's the fleet doing?", fleet_stats, {}, [])
+    second = engine.answer("how's the fleet doing?", fleet_stats, {}, [])
+
+    assert first == second == "cached answer"
+    assert len(client.create_calls) == 1  # second call was served from cache, no API hit
+
+
+def test_anthropic_engine_cache_miss_once_stats_snapshot_changes():
+    client = FakeAnthropicClient("answer")
+    engine = AnthropicStatsQueryEngine(api_key="fake", client=client)
+
+    engine.answer("how's the fleet doing?", FleetStats(total_missions=4, total_succeeded=3), {}, [])
+    engine.answer("how's the fleet doing?", FleetStats(total_missions=5, total_succeeded=4), {}, [])
+
+    # Same question, but the fleet moved (one more mission completed) --
+    # must NOT be served a stale cached answer.
+    assert len(client.create_calls) == 2
